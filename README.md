@@ -76,6 +76,18 @@ node --test test/ag-channel.test.mjs
 
 覆盖：baseURL 归一、只改 ag 不碰别的 provider、非目标 fiber 放行、status 输出。
 
+## 分享 / 分发
+
+```bash
+pnpm pack          # 产出 dsh-ag-channel-0.1.0.tgz
+```
+
+对方拿到后：`dsh plugin --profile desktop add ./dsh-ag-channel-0.1.0.tgz`，
+或手改 profile 的 `package.json` 写 `"dsh-ag-channel": "file:./path/to/xxx.tgz"` 后 `pnpm install`。
+长期维护建议推 Git 仓库，对方写 `"dsh-ag-channel": "github:<你>/dsh-ag-channel"`。
+
+> 若要发到 npm，删掉 `package.json` 里的 `private: true`。
+
 ## 许可
 
 MIT
