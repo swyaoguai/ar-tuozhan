@@ -1,0 +1,15 @@
+# dsh-ag-channel bundle patch.
+#
+# 插件半身靠这一行挂到 Host 上；name 必须是裸包名。
+# 它接管的是 llm-pi-ai 里的 providers.ag —— 别的 provider 一概不碰，
+# 所以这里不需要（也不该）再声明 llm-pi-ai 那一条。
+- insert:
+    - id: ag-channel
+      name: 'dsh-ag-channel'
+      config:
+        enabled: true
+        url: "https://ps.air-outer.com/v1"
+        apiKeyEnv: "AG_API_KEY"
+        originator: "codex_cli_rs"
+        displayName: "ag"
+        autoFailover: true
