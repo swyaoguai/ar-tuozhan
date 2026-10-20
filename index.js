@@ -104,6 +104,39 @@ export function apply(ctx, config = {}) {
   }
   const agKeys = () => (Array.isArray(state.keys) ? state.keys.filter((key) => typeof key === 'string' && key.length > 0) : [])
 
+  /**
+   * 生效中的 provider 配置。每次 llm-pi-ai 的配置被解析时刷新，
+   * 界面上显示的就是它（用户自己在「设置 → 模型」改过的值优先）。
+   */
+  let effective = null
+
+  /**
+   * 把 ag provider 的字段写进 profile 的 cordis.patch.yml ——
+   * 走的是「设置 → 模型」背后那个 configEditor 服务：同样的校验、
+   * 同样的文件锁、同样的热重载。**单一数据源**：插件界面改的和
+   * Models 页改的是同一份东西，谁都不会冲掉谁。
+   */
+  let configEditor = null
+  ctx.inject(['configEditor'], (scoped) => {
+    configEditor = scoped.configEditor ?? null
+  })
+  const writeAgProfile = async (fields) => {
+    if (configEditor === null) {
+      throw new Error('这个 profile 没有配置编辑器（configEditor），无法写入 provider 配置')
+    }
+    const entry = configEditor.entries().find((item) => item.options.id === 'llm-pi-ai')
+    if (entry === undefined) {
+      throw new Error('找不到 llm-pi-ai 条目')
+    }
+    await configEditor.edit(entry, (current) => ({
+      ...current,
+      providers: {
+        ...(current.providers ?? {}),
+        ag: { ...(current.providers?.ag ?? {}), ...fields },
+      },
+    }))
+  }
+
   /** 通用 key 池（其它渠道用），从 ~/.dsh/key-pool.json 读。 */
   const genericPools = () => readPools(home, poolConfigPath(home))
 
@@ -159,18 +192,31 @@ export function apply(ctx, config = {}) {
   })
 
   if (config.enabled !== false) {
-    // 全局拦截：只认 llm-pi-ai 那个 fiber，只改 providers.ag。
+    // 全局拦截：只认 llm-pi-ai 那个 fiber，只动 providers.ag。
+    //
+    // 合并而不是覆盖：用户在「设置 → 模型」里保存的 ag 配置（模型、名称、
+    // 上下文、输出上限、思考强度…）写在 profile 的 patch 里，那份优先；
+    // 插件只补齐用户没写的部分（请求头、协议、凭据引用、默认模型列表）。
+    // 这样两边改的是同一份数据，谁都不会把对方冲掉。
     ctx.on('internal/config', function (raw, next) {
       const resolved = next()
       if (!isTargetFiber(this)) return resolved
       const providers = { ...(resolved?.providers ?? {}) }
-      providers.ag = buildProfile()
+      const existing = providers.ag !== null && typeof providers.ag === 'object' ? providers.ag : {}
+      const defaults = buildProfile()
+      const merged = {
+        ...defaults,
+        ...existing,
+        models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
+        headers: { ...defaults.headers, ...(existing.headers ?? {}) },
+      }
+      providers.ag = merged
+      effective = merged
       return { ...resolved, providers }
     }, { global: true })
 
     ctx.logger?.info?.(
-      `dsh-ag-channel: ag 渠道 baseURL=${baseURL()}（实际请求 ${requestUrlOf(baseURL())}）` +
-      ` 预设=${presetOf(chosen())} 模型=${models().map((m) => m.id).join(',')} key 数=${agKeys().length}`,
+      `dsh-ag-channel: ag 渠道已接管（默认 baseURL=${baseURL()}，模型=${models().map((m) => m.id).join(',')}，key 数=${agKeys().length}）`,
     )
   }
 
@@ -253,17 +299,34 @@ export function apply(ctx, config = {}) {
           if (typeof value !== 'string' || value.length === 0) {
             return { kind: 'error', text: '用法：url <ps|agentrouter|完整端点>' }
           }
+          const next = resolveBaseURL(value)
+          try {
+            // 写进 profile patch —— 和「设置 → 模型」里改 baseURL 是同一份数据
+            await writeAgProfile({ baseURL: next })
+          } catch (error) {
+            return { kind: 'error', text: `改地址失败：${error?.message ?? error}` }
+          }
           state.url = value
           writeState(home, state)
-          const hmr = ctx.get('hmr')
-          if (hmr?.reconcileProfile !== undefined) {
-            try { await hmr.reconcileProfile([]) } catch { /* 下面提示重启 */ }
-          }
           return {
             kind: 'success',
-            text: `ag 渠道地址已切到 ${value}（baseURL=${baseURL()}，请求 ${requestUrlOf(baseURL())}）。` +
-              (hmr?.reconcileProfile === undefined ? '\n这个 profile 不支持热重载，请重启 DSH 生效。' : ''),
+            text: `ag 渠道地址已切到 ${value}（baseURL=${next}，请求 ${requestUrlOf(next)}）。` +
+              '\n已写入 profile 配置，「设置 → 模型」里看到的就是它。',
           }
+        }
+
+        if (action === 'models') {
+          const list = effective?.models ?? models()
+          const lines = ['ag 渠道的模型（这里改 / 在「设置 → 模型」里改，写进的是同一份 profile 配置）：']
+          for (const model of list) {
+            lines.push(`  ${model.id}`)
+            lines.push(`    名称: ${model.name ?? model.id}`)
+            lines.push(`    上下文: ${model.contextWindow ?? '(默认)'}   输出上限: ${model.maxTokens ?? '(默认)'}`)
+            lines.push(`    输入类型: ${Array.isArray(model.input) && model.input.length > 0 ? model.input.join(', ') : '(默认)'}`)
+            lines.push(`    思考强度: ${model.reasoningEfforts === false ? '不支持' : JSON.stringify(model.reasoningEfforts ?? '(默认)')}`)
+          }
+          lines.push('', '想改就用「设置 → 模型」里编辑 ag，或用面板里的模型编辑器。')
+          return { kind: 'success', text: lines.join('\n') }
         }
 
         if (action === 'add') {
@@ -372,13 +435,14 @@ export function apply(ctx, config = {}) {
         ok: true,
         url: chosen(),
         preset: presetOf(chosen()),
-        baseURL: baseURL(),
-        requestUrl: requestUrlOf(baseURL()),
-        credentialRef: buildProfile().apiKeyEnv,
-        headers: buildProfile().headers,
-        models: models(),
+        baseURL: effective?.baseURL ?? baseURL(),
+        requestUrl: requestUrlOf(effective?.baseURL ?? baseURL()),
+        credentialRef: effective?.apiKeyEnv ?? buildProfile().apiKeyEnv,
+        headers: effective?.headers ?? buildProfile().headers,
+        models: effective?.models ?? models(),
         keys,
         poolId: 'ag',
+        canWriteProfile: configEditor !== null,
       }
     }
 
@@ -423,12 +487,45 @@ export function apply(ctx, config = {}) {
           const body = JSON.parse((await readBody(req)) || '{}')
           const value = typeof body.url === 'string' ? body.url.trim() : ''
           if (value === '') { sendJson(res, 400, { ok: false, error: '端点不能为空' }); return }
+          const next = resolveBaseURL(value)
+          try {
+            await writeAgProfile({ baseURL: next })
+          } catch (error) {
+            sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
+            return
+          }
           state.url = value
           writeState(home, state)
-          const hmr = ctx.get('hmr')
-          if (hmr?.reconcileProfile !== undefined) {
-            try { await hmr.reconcileProfile([]) } catch { /* 下面会提示重启 */ }
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
+        if (req.method === 'POST' && sub === 'api/models') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const list = Array.isArray(body.models) ? body.models : null
+          if (list === null) { sendJson(res, 400, { ok: false, error: 'models 必须是数组' }); return }
+          const cleaned = list
+            .filter((model) => model !== null && typeof model === 'object' && typeof model.id === 'string' && model.id.length > 0)
+            .map((model) => ({
+              id: model.id,
+              name: typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id,
+              ...(Number.isInteger(model.contextWindow) && model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
+              ...(Number.isInteger(model.maxTokens) && model.maxTokens > 0 ? { maxTokens: model.maxTokens } : {}),
+              ...(Array.isArray(model.input) && model.input.length > 0 ? { input: [...model.input].filter((m) => m === 'text' || m === 'image') } : {}),
+              ...(model.reasoningEfforts === false
+                ? { reasoningEfforts: false }
+                : model.reasoningEfforts !== null && typeof model.reasoningEfforts === 'object'
+                  ? { reasoningEfforts: model.reasoningEfforts }
+                  : {}),
+            }))
+          if (cleaned.length === 0) { sendJson(res, 400, { ok: false, error: '至少要有一个模型' }); return }
+          try {
+            await writeAgProfile({ models: cleaned })
+          } catch (error) {
+            sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
+            return
           }
+          state.models = cleaned
+          writeState(home, state)
           sendJson(res, 200, stateSnapshot())
           return
         }

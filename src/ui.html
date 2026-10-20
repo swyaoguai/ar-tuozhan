@@ -42,6 +42,9 @@
   .pill.bad { background:rgba(224,49,49,.16); color:var(--bad); }
   .pill.mute { background:rgba(128,128,128,.16); color:var(--dim); }
   .empty { color:var(--dim); font-size:13px; padding:14px 0; text-align:center; }
+  .modelCard { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:var(--panel2); }
+  .lbl { font-size:12px; color:var(--dim); }
+  .chk { display:inline-flex; align-items:center; gap:4px; font-size:12px; color:var(--fg); }
   .hint { color:var(--dim); font-size:12px; margin:8px 0 0; }
   .toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); padding:9px 16px; border-radius:999px; background:var(--panel2); border:1px solid var(--line); font-size:13px; opacity:0; transition:.2s; pointer-events:none; }
   .toast.show { opacity:1; }
@@ -82,6 +85,15 @@
     </div>
     <div id="keyTable"></div>
     <p class="hint">池里只有一个 key 时没有轮换可言 —— 建议至少放两个。</p>
+  </div>
+  <div class="card">
+    <h2>模型</h2>
+    <p class="hint" style="margin:0 0 10px">这里改的和「设置 → 模型」里编辑 ag 是同一份 profile 配置，两边实时同步。</p>
+    <div id="modelList"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="saveModels">保存模型配置</button>
+      <button class="ghost" id="addModel">添加模型</button>
+    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -125,6 +137,8 @@ function render() {
   $('url').value = state.url
   $('preset').value = state.preset === 'custom' ? 'custom' : state.preset
   $('keyCount').textContent = state.keys.length + ' 个'
+  modelDraft = draftFrom(state.models)
+  renderModels()
 
   const table = $('keyTable')
   if (state.keys.length === 0) {
@@ -155,6 +169,121 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
+const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/** 编辑中的模型（页面本地副本，保存时才写进 profile）。 */
+let modelDraft = []
+
+function draftFrom(stateModels) {
+  return (stateModels ?? []).map((model) => ({
+    id: model.id,
+    name: model.name ?? model.id,
+    contextWindow: model.contextWindow ?? '',
+    maxTokens: model.maxTokens ?? '',
+    input: Array.isArray(model.input) && model.input.length > 0 ? [...model.input] : ['text'],
+    reasoning: model.reasoningEfforts === false
+      ? { none: true }
+      : { none: false, levels: Object.keys(model.reasoningEfforts ?? {}) },
+  }))
+}
+
+function renderModels() {
+  const box = $('modelList')
+  if (modelDraft.length === 0) {
+    box.innerHTML = '<div class="empty">还没有模型 —— 点「添加模型」。</div>'
+    return
+  }
+  let html = ''
+  modelDraft.forEach((model, index) => {
+    html += '<div class="modelCard">'
+    html += '<div class="row" style="margin-bottom:8px">'
+    html += '<input class="grow" data-f="id" data-i="' + index + '" value="' + escapeHtml(model.id) + '" placeholder="模型 id">'
+    html += '<input class="grow" data-f="name" data-i="' + index + '" value="' + escapeHtml(model.name) + '" placeholder="显示名称">'
+    html += '<button class="ghost danger" data-rm="' + index + '">删除</button>'
+    html += '</div>'
+    html += '<div class="row" style="margin-bottom:8px">'
+    html += '<label class="lbl">上下文</label><input style="width:120px" data-f="contextWindow" data-i="' + index + '" value="' + escapeHtml(String(model.contextWindow)) + '" placeholder="默认">'
+    html += '<label class="lbl">输出上限</label><input style="width:120px" data-f="maxTokens" data-i="' + index + '" value="' + escapeHtml(String(model.maxTokens)) + '" placeholder="默认">'
+    html += '</div>'
+    html += '<div class="row" style="margin-bottom:8px">'
+    html += '<span class="lbl">输入</span>'
+    for (const modality of ['text', 'image']) {
+      const on = model.input.includes(modality)
+      html += '<label class="chk"><input type="checkbox" data-m="' + modality + '" data-i="' + index + '"' + (on ? ' checked' : '') + '> ' + (modality === 'text' ? '文本' : '图片') + '</label>'
+    }
+    html += '</div>'
+    html += '<div class="row">'
+    html += '<span class="lbl">思考强度</span>'
+    html += '<label class="chk"><input type="checkbox" data-none="' + index + '"' + (model.reasoning.none ? ' checked' : '') + '> 不支持</label>'
+    for (const level of LEVELS) {
+      if (level === 'off') continue
+      const on = !model.reasoning.none && model.reasoning.levels.includes(level)
+      html += '<label class="chk"><input type="checkbox" data-lv="' + level + '" data-i="' + index + '"' + (on ? ' checked' : '') + (model.reasoning.none ? ' disabled' : '') + '> ' + level + '</label>'
+    }
+    html += '</div>'
+    html += '</div>'
+  })
+  box.innerHTML = html
+
+  for (const input of box.querySelectorAll('input[data-f]')) {
+    input.addEventListener('input', () => {
+      const model = modelDraft[Number(input.dataset.i)]
+      const field = input.dataset.f
+      model[field] = field === 'contextWindow' || field === 'maxTokens'
+        ? (input.value === '' ? '' : Number(input.value))
+        : input.value
+    })
+  }
+  for (const input of box.querySelectorAll('input[data-m]')) {
+    input.addEventListener('change', () => {
+      const model = modelDraft[Number(input.dataset.i)]
+      const modality = input.dataset.m
+      if (input.checked) { if (!model.input.includes(modality)) model.input.push(modality) }
+      else model.input = model.input.filter((m) => m !== modality)
+    })
+  }
+  for (const input of box.querySelectorAll('input[data-lv]')) {
+    input.addEventListener('change', () => {
+      const model = modelDraft[Number(input.dataset.i)]
+      const level = input.dataset.lv
+      if (input.checked) { if (!model.reasoning.levels.includes(level)) model.reasoning.levels.push(level) }
+      else model.reasoning.levels = model.reasoning.levels.filter((l) => l !== level)
+    })
+  }
+  for (const input of box.querySelectorAll('input[data-none]')) {
+    input.addEventListener('change', () => {
+      const model = modelDraft[Number(input.dataset.i)]
+      model.reasoning.none = input.checked
+      renderModels()
+    })
+  }
+  for (const btn of box.querySelectorAll('button[data-rm]')) {
+    btn.addEventListener('click', () => {
+      modelDraft.splice(Number(btn.dataset.rm), 1)
+      renderModels()
+    })
+  }
+}
+
+/** 编辑副本 → profile 里的模型条目。 */
+function modelsFromDraft() {
+  return modelDraft.map((model) => {
+    const entry = { id: model.id, name: model.name || model.id }
+    if (Number.isInteger(model.contextWindow) && model.contextWindow > 0) entry.contextWindow = model.contextWindow
+    if (Number.isInteger(model.maxTokens) && model.maxTokens > 0) entry.maxTokens = model.maxTokens
+    if (Array.isArray(model.input) && model.input.length > 0) entry.input = [...model.input]
+    if (model.reasoning.none) {
+      entry.reasoningEfforts = false
+    } else if (model.reasoning.levels.length > 0) {
+      const efforts = {}
+      for (const level of model.reasoning.levels) efforts[level] = level
+      if (model.reasoning.levels.length > 1 || !model.reasoning.levels.includes('off')) efforts.off = null
+      entry.reasoningEfforts = efforts
+    }
+    return entry
+  })
+}
+
 async function load() {
   try {
     state = await api('state')
@@ -180,6 +309,18 @@ $('saveUrl').addEventListener('click', async () => {
 
 $('reset').addEventListener('click', async () => {
   try { await api('reset', {}); await load(); toast('冷却已清除') }
+  catch (e) { toast(e.message, true) }
+})
+
+$('addModel').addEventListener('click', () => {
+  modelDraft.push({ id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: { none: false, levels: [] } })
+  renderModels()
+})
+
+$('saveModels').addEventListener('click', async () => {
+  const models = modelsFromDraft().filter((model) => model.id.trim().length > 0)
+  if (models.length === 0) return toast('至少要有一个模型（填 id）', true)
+  try { await api('models', { models }); await load(); toast('模型配置已保存') }
   catch (e) { toast(e.message, true) }
 })
 

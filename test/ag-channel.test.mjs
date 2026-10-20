@@ -20,16 +20,29 @@ function makeCtx() {
   const hooks = []
   const commands = []
   const registered = []
+  const edits = []
+  const configEditor = {
+    entries: () => [{ options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai' } }],
+    edit: async (entry, change) => {
+      const current = { providers: {} }
+      const next = change(current, {})
+      edits.push({ id: entry.options.id, next })
+      return next
+    },
+  }
   return {
     hooks,
     commands,
     registered,
+    edits,
     logger: { info() {}, warn() {}, error() {} },
     on(event, listener) { if (event === 'internal/config') hooks.push(listener) },
     inject(names, fn) {
       fn({
         commands: { register: (cmd) => commands.push(cmd) },
         webServer: { register: (route) => registered.push(route) },
+        configEditor,
+        credentials: { resolve: async () => undefined, set: async () => {} },
         effect: (run) => { const dispose = run(); return () => dispose?.() },
       })
     },
@@ -89,12 +102,13 @@ test('只改 llm-pi-ai 的 providers.ag，其它 provider 原样保留', () => {
   const out = ctx.hooks[0].call(LLM_PI_AI_FIBER, raw, next)
 
   assert.deepEqual(out.providers['minimax-cn'], raw.providers['minimax-cn'], '别的 provider 不能被碰')
-  assert.equal(out.providers.ag.baseURL, 'https://ps.air-outer.com')
+  // 用户在 patch 里保存过的 ag 字段保持不变（合并，不是覆盖）
+  assert.equal(out.providers.ag.baseURL, 'https://old.example')
+  assert.deepEqual(out.providers.ag.models, [{ id: 'old' }])
+  // 插件只补齐用户没写的
+  assert.equal(out.providers.ag.headers.originator, 'codex_cli_rs')
   assert.equal(out.providers.ag.api, 'anthropic-messages')
   assert.equal(out.providers.ag.apiKeyEnv, 'AG_API_KEY')
-  assert.deepEqual(out.providers.ag.headers, { originator: 'codex_cli_rs' })
-  assert.deepEqual(out.providers.ag.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
-  assert.deepEqual(out.providers.ag.models.at(-1).input, ['text', 'image'], '带图片输入的模型要保留 input')
   assert.notEqual(out.providers.ag, raw.providers.ag, 'ag 必须被换成插件的版本')
 })
 
@@ -127,6 +141,47 @@ test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', as
   const saved = JSON.parse(fs.readFileSync(path.join(home, 'ag-channel.json'), 'utf8'))
   assert.deepEqual(saved.keys, ['sk-secret-123456'])
   assert.match(out.text, /sk-s…3456|已加入 key/)
+})
+
+test('用户在「设置 → 模型」里保存的 ag 配置优先于插件默认值（不会被插件冲掉）', () => {
+  const ctx = makeCtx()
+  apply(ctx, { enabled: true, url: URL_PRESETS.ps, apiKeyEnv: 'AG_API_KEY', originator: 'codex_cli_rs', autoFailover: false })
+
+  // 模拟 profile patch 里已有 providers.ag（用户在 Models 页改过）
+  const raw = {
+    providers: {
+      ag: {
+        apiKeyEnv: 'AG_API_KEY',
+        api: 'anthropic-messages',
+        baseURL: 'https://ps.air-outer.com',
+        models: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar', contextWindow: 256000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high' } }],
+        displayName: '我的 ag',
+      },
+    },
+  }
+  const out = ctx.hooks[0].call(LLM_PI_AI_FIBER, raw, () => raw)
+  const ag = out.providers.ag
+
+  assert.equal(ag.models.length, 1, '用户自己的模型列表要原样保留')
+  assert.equal(ag.models[0].name, 'gpt-6.1-sol-ar')
+  assert.equal(ag.models[0].contextWindow, 256000)
+  assert.equal(ag.models[0].maxTokens, 32000)
+  assert.deepEqual(ag.models[0].input, ['text', 'image'])
+  assert.deepEqual(ag.models[0].reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high' })
+  assert.equal(ag.displayName, '我的 ag')
+  assert.equal(ag.baseURL, 'https://ps.air-outer.com')
+  // 插件补齐用户没写的部分
+  assert.equal(ag.headers.originator, 'codex_cli_rs', 'originator 头要补上')
+  assert.equal(ag.api, 'anthropic-messages')
+})
+
+test('没保存过 ag 时用插件默认模型', () => {
+  const ctx = makeCtx()
+  apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false })
+  const raw = { providers: {} }
+  const out = ctx.hooks[0].call(LLM_PI_AI_FIBER, raw, () => raw)
+  assert.deepEqual(out.providers.ag.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
+  assert.equal(out.providers.ag.baseURL, 'https://ps.air-outer.com')
 })
 
 test('webServer 路由：页面、读状态、加删 key、切地址都能用', async () => {
@@ -167,9 +222,24 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
 
   const switched = await call('POST', '/dsh-ag-channel/api/url', { url: 'agentrouter' })
   assert.equal(JSON.parse(switched.body).baseURL, 'https://agentrouter.org')
+  // 地址是写进 profile patch 的（和「设置 → 模型」同一份数据）
+  assert.equal(ctx.edits.at(-1).next.providers.ag.baseURL, 'https://agentrouter.org')
 
   const removed = await call('POST', '/dsh-ag-channel/api/keys/remove', { key: 'sk-one' })
   assert.equal(JSON.parse(removed.body).keys.length, before + 1)
+
+  // 写模型
+  const modelsSaved = await call('POST', '/dsh-ag-channel/api/models', {
+    models: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar', contextWindow: 256000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: { off: null, low: 'low' } }],
+  })
+  assert.equal(modelsSaved.status, 200)
+  const written = ctx.edits.at(-1).next.providers.ag.models
+  assert.equal(written.length, 1)
+  assert.equal(written[0].id, 'gpt-6.1-sol')
+  assert.equal(written[0].contextWindow, 256000)
+  assert.equal(written[0].maxTokens, 32000)
+  assert.deepEqual(written[0].input, ['text', 'image'])
+  assert.deepEqual(written[0].reasoningEfforts, { off: null, low: 'low' })
 
   const missing = await call('GET', '/dsh-ag-channel/api/nope')
   assert.equal(missing.status, 404)

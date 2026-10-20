@@ -53,6 +53,134 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+    /** 编辑副本 → profile 里的模型条目（和网页版同一套规则）。 */
+    function modelsFromDraft(draft) {
+      return draft.map((model) => {
+        const entry = { id: model.id, name: model.name || model.id }
+        if (Number.isInteger(model.contextWindow) && model.contextWindow > 0) entry.contextWindow = model.contextWindow
+        if (Number.isInteger(model.maxTokens) && model.maxTokens > 0) entry.maxTokens = model.maxTokens
+        if (Array.isArray(model.input) && model.input.length > 0) entry.input = [...model.input]
+        if (model.reasoning.none) {
+          entry.reasoningEfforts = false
+        } else if (model.reasoning.levels.length > 0) {
+          const efforts = {}
+          for (const level of model.reasoning.levels) efforts[level] = level
+          if (model.reasoning.levels.length > 1 || !model.reasoning.levels.includes('off')) efforts.off = null
+          entry.reasoningEfforts = efforts
+        }
+        return entry
+      })
+    }
+
+    function draftFrom(models) {
+      return (models ?? []).map((model) => ({
+        id: model.id,
+        name: model.name ?? model.id,
+        contextWindow: model.contextWindow ?? '',
+        maxTokens: model.maxTokens ?? '',
+        input: Array.isArray(model.input) && model.input.length > 0 ? [...model.input] : ['text'],
+        reasoning: model.reasoningEfforts === false
+          ? { none: true }
+          : { none: false, levels: Object.keys(model.reasoningEfforts ?? {}) },
+      }))
+    }
+
+    function ModelEditor({ models, onSave, disabled }) {
+      const [draft, setDraft] = useState(() => draftFrom(models))
+      useEffect(() => { setDraft(draftFrom(models)) }, [models])
+      const patch = (index, changes) => setDraft((list) => list.map((model, i) => (i === index ? { ...model, ...changes } : model)))
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+        draft.map((model, index) => h('div', {
+          key: index,
+          style: { border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8 },
+        },
+          h('div', { style: S.row },
+            h('input', {
+              style: { ...S.input, ...S.grow }, placeholder: '模型 id', value: model.id,
+              onChange: (e) => patch(index, { id: e.target.value }),
+            }),
+            h('input', {
+              style: { ...S.input, ...S.grow }, placeholder: '显示名称', value: model.name,
+              onChange: (e) => patch(index, { name: e.target.value }),
+            }),
+            h('button', {
+              style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
+              onClick: () => setDraft((list) => list.filter((_, i) => i !== index)),
+            }, '删除'),
+          ),
+          h('div', { style: S.row },
+            h('span', { style: { fontSize: 11, opacity: 0.6 } }, '上下文'),
+            h('input', {
+              style: { ...S.input, width: 110 }, placeholder: '默认', value: String(model.contextWindow),
+              onChange: (e) => patch(index, { contextWindow: e.target.value === '' ? '' : Number(e.target.value) }),
+            }),
+            h('span', { style: { fontSize: 11, opacity: 0.6 } }, '输出上限'),
+            h('input', {
+              style: { ...S.input, width: 110 }, placeholder: '默认', value: String(model.maxTokens),
+              onChange: (e) => patch(index, { maxTokens: e.target.value === '' ? '' : Number(e.target.value) }),
+            }),
+          ),
+          h('div', { style: S.row },
+            h('span', { style: { fontSize: 11, opacity: 0.6 } }, '输入'),
+            ...['text', 'image'].map((modality) => h('label', { key: modality, style: { fontSize: 12, display: 'inline-flex', gap: 4, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox',
+                checked: model.input.includes(modality),
+                onChange: (e) => patch(index, {
+                  input: e.target.checked ? [...model.input, modality] : model.input.filter((m) => m !== modality),
+                }),
+              }),
+              modality === 'text' ? '文本' : '图片',
+            )),
+          ),
+          h('div', { style: S.row },
+            h('span', { style: { fontSize: 11, opacity: 0.6 } }, '思考强度'),
+            h('label', { style: { fontSize: 12, display: 'inline-flex', gap: 4, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox',
+                checked: model.reasoning.none,
+                onChange: (e) => patch(index, { reasoning: { ...model.reasoning, none: e.target.checked } }),
+              }),
+              '不支持',
+            ),
+            ...LEVELS.filter((level) => level !== 'off').map((level) => h('label', {
+              key: level,
+              style: { fontSize: 12, display: 'inline-flex', gap: 4, alignItems: 'center' },
+            },
+              h('input', {
+                type: 'checkbox',
+                disabled: model.reasoning.none,
+                checked: !model.reasoning.none && model.reasoning.levels.includes(level),
+                onChange: (e) => patch(index, {
+                  reasoning: {
+                    ...model.reasoning,
+                    levels: e.target.checked
+                      ? [...model.reasoning.levels, level]
+                      : model.reasoning.levels.filter((l) => l !== level),
+                  },
+                }),
+              }),
+              level,
+            )),
+          ),
+        )),
+        h('div', { style: S.row },
+          h('button', {
+            style: S.btn,
+            onClick: () => setDraft((list) => [...list, { id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: { none: false, levels: [] } }]),
+          }, '添加模型'),
+          h('button', {
+            style: S.btnPrimary,
+            disabled,
+            onClick: () => onSave(modelsFromDraft(draft).filter((model) => model.id.trim().length > 0)),
+          }, '保存模型配置'),
+        ),
+      )
+    }
+
     function AgChannelSettings() {
       const [state, setState] = useState(null)
       const [error, setError] = useState(null)
@@ -149,6 +277,16 @@ window.__ModuleLoader__.load({
               )),
             ),
           h('p', { style: S.hint }, '上游返回 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。池里只有一个 key 时没有轮换可言。'),
+        ),
+
+        h('div', { style: S.card },
+          h('h2', { style: S.h2 }, '模型'),
+          h('p', { style: S.hint }, '这里改的和「设置 → 模型」里编辑 ag 是同一份 profile 配置，两边实时同步。'),
+          h(ModelEditor, {
+            models: state.models,
+            disabled: busy,
+            onSave: (models) => run(() => api('models', { models })),
+          }),
         ),
 
         error ? h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, error) : null,
