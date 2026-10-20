@@ -1,5 +1,8 @@
 /**
- * ag 渠道的地址与状态。
+ * ag 渠道的状态与地址。
+ *
+ * 状态文件 ~/.dsh/ag-channel.json 里放这个渠道的一切：
+ *   { "url": "https://ps.air-outer.com/v1", "keys": ["sk-…"], "models": [...] }
  *
  * 注意 baseURL 的归一：Anthropic 协议下 pi-ai 走的是官方 SDK，
  * `beta.messages` 打的是 `<baseURL>/v1/messages`。所以用户手里的
@@ -18,7 +21,7 @@ export const URL_PRESETS = {
 
 export const DEFAULT_PRESET = 'ps'
 
-/** 渠道里现在这四个模型（与 profile 里原先写的一致）。 */
+/** 渠道里默认这四个模型（可在设置页或状态文件里改）。 */
 export const DEFAULT_MODELS = [
   { id: 'deepseek-v4-flash', name: 'deepseek-v4-flash' },
   { id: 'claude-opus-5.5', name: 'claude-opus-5.5' },
@@ -67,7 +70,7 @@ export function normalizeBaseURL(input) {
   return url
 }
 
-/** 用户填的端点 → 实际请求地址（给日志看）。 */
+/** 归一后的 baseURL → 实际请求地址（给日志看）。 */
 export function requestUrlOf(baseURL) {
   return `${baseURL}/v1/messages`
 }
@@ -77,4 +80,18 @@ export function resolveBaseURL(choice) {
   const preset = URL_PRESETS[choice]
   const raw = typeof choice === 'string' && choice.length > 0 ? choice : URL_PRESETS[DEFAULT_PRESET]
   return normalizeBaseURL(preset ?? raw)
+}
+
+/** 归一后的 baseURL → host（key 池要按 host 匹配请求）。 */
+export function hostOfBaseURL(baseURL) {
+  try {
+    return new URL(baseURL).host.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+/** 两个预设的 host（自动兜底时互换用）。 */
+export function presetHosts() {
+  return Object.values(URL_PRESETS).map((url) => hostOfBaseURL(normalizeBaseURL(url)))
 }

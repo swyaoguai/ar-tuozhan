@@ -1,26 +1,35 @@
 /**
- * dsh-ag-channel — 只管「ag」这一个模型渠道的插件。
+ * dsh-ag-channel — 只管「ag」这一个模型渠道的插件（自带 key 轮询）。
  *
- * 它做两件事：
+ * 它做三件事：
  *   1. 在运行时接管 llm-pi-ai 的 provider 配置里的 `ag` 这一条：
  *      apiKeyEnv / api / baseURL / models / headers(originator: codex_cli_rs)；
  *      其它 provider（minimax-cn 等）一概不碰。
- *   2. 两个可用地址（ps.air-outer.com / agentrouter.org）任选其一，
- *      也可以让主地址连不上时自动换另一个。
+ *   2. 给这个渠道挂一个 key 池：某个 key 额度耗尽 / 失效 / 被限流时，
+ *      自动切到下一个 key 并重发当前请求（池的引擎对其它渠道也可用）。
+ *   3. 两个可用地址（ps.air-outer.com / agentrouter.org）任选其一，
+ *      主地址连不上时自动换另一个。
  *
  * 为什么能在运行时接管：DSH 的 provider 配置在 fiber 装载时解析，
  * `internal/config` 是 cordis 的 waterfall 事件；用 `{ global: true }` 注册的
  * 监听器会看到每个 fiber 的配置解析，`this` 就是那个 fiber。
  * 我们只认 llm-pi-ai 这一个 fiber，并且只改 `providers.ag`。
  *
+ * 状态全在 ~/.dsh 下：
+ *   ~/.dsh/ag-channel.json   这个渠道的地址、key、模型
+ *   ~/.dsh/key-pool.json     其它渠道的通用 key 池（可选）
+ *
  * @module index.js
  */
 import fs from 'node:fs'
 import {
-  DEFAULT_MODELS, DEFAULT_PRESET, URL_PRESETS, dshHome, readState, requestUrlOf,
-  resolveBaseURL, statePath, writeState,
+  DEFAULT_MODELS, DEFAULT_PRESET, URL_PRESETS, dshHome, hostOfBaseURL, normalizeBaseURL,
+  presetHosts, readState, requestUrlOf, resolveBaseURL, statePath, writeState,
 } from './src/channel.js'
+import { KeyPoolEngine, maskKey } from './src/pool.js'
+import { installFetchGuard } from './src/fetch-guard.js'
 import { installUrlFailover } from './src/url-failover.js'
+import { poolConfigPath, readPools, readState as readPoolState, writeState as writePoolState } from './src/store.js'
 
 export const name = 'ag-channel'
 
@@ -46,8 +55,9 @@ try {
       name: Schema.string(),
       input: Schema.array(Schema.string()).optional(),
     })).default([]).description('模型列表（留空用内置的四个）'),
+    keyRotation: Schema.boolean().default(true).description('key 轮询：额度耗尽/失效/限流时自动换下一个 key'),
     autoFailover: Schema.boolean().default(true).description('主地址连不上时自动换另一个地址重发'),
-  }).description('ag 渠道（agentrouter / ps.air-outer）')
+  }).description('ag 渠道（agentrouter / ps.air-outer，含 key 轮询）')
 } catch {
   Config = undefined
 }
@@ -62,13 +72,13 @@ function isTargetFiber(fiber) {
 export function apply(ctx, config = {}) {
   const home = dshHome()
   const state = readState(home)
+  const poolState = readPoolState(home)
 
   const chosen = () => {
     const fromState = typeof state.url === 'string' && state.url.length > 0 ? state.url : undefined
     const fromConfig = typeof config.url === 'string' && config.url.length > 0 ? config.url : undefined
     return fromState ?? fromConfig ?? URL_PRESETS[DEFAULT_PRESET]
   }
-
   const baseURL = () => resolveBaseURL(chosen())
   const presetOf = (value) => {
     for (const [name, url] of Object.entries(URL_PRESETS)) {
@@ -76,7 +86,6 @@ export function apply(ctx, config = {}) {
     }
     return 'custom'
   }
-
   const models = () => {
     const list = Array.isArray(state.models) && state.models.length > 0
       ? state.models
@@ -90,6 +99,50 @@ export function apply(ctx, config = {}) {
         name: typeof model.name === 'string' ? model.name : model.id,
         ...(Array.isArray(model.input) && model.input.length > 0 ? { input: [...model.input] } : {}),
       }))
+  }
+  const agKeys = () => (Array.isArray(state.keys) ? state.keys.filter((key) => typeof key === 'string' && key.length > 0) : [])
+
+  /** 通用 key 池（其它渠道用），从 ~/.dsh/key-pool.json 读。 */
+  const genericPools = () => readPools(home, poolConfigPath(home))
+
+  /** 这个渠道自己的池：host 覆盖两个预设地址，key 来自状态文件。 */
+  const agPool = () => ({
+    id: 'ag',
+    keys: agKeys(),
+    hosts: presetHosts(),
+    credentialRef: typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0 ? config.apiKeyEnv : 'AG_API_KEY',
+    strategy: 'failover',
+    authHeader: 'auto',
+    cooldownMs: { quota: 60 * 60 * 1000, auth: 60 * 60 * 1000, rateLimit: 60 * 1000 },
+    seed: true,
+  })
+
+  const persistPoolState = () => {
+    try { writePoolState(home, poolState) } catch { /* 落盘失败不影响轮询 */ }
+  }
+
+  const engine = new KeyPoolEngine({
+    pools: [agPool(), ...genericPools()],
+    state: poolState,
+    persist: persistPoolState,
+    onRotate: ({ pool, key }) => {
+      ctx.logger?.info?.(`dsh-ag-channel: 池 ${pool.id} 已切到 ${maskKey(key)}`)
+      void writeCredential(pool, key)
+    },
+  })
+
+  /** 凭据服务可选：有就把换到的 key 写回去，下一次请求原生就用它。 */
+  let credentials = null
+  ctx.inject(['credentials'], (scoped) => {
+    credentials = scoped.credentials ?? null
+  })
+  const writeCredential = async (pool, key) => {
+    if (credentials === null || pool.credentialRef === '') return
+    try {
+      await credentials.set?.(pool.credentialRef, key)
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-ag-channel: 写回凭据 ${pool.credentialRef} 失败: ${error?.message ?? error}`)
+    }
   }
 
   const buildProfile = () => ({
@@ -115,33 +168,81 @@ export function apply(ctx, config = {}) {
 
     ctx.logger?.info?.(
       `dsh-ag-channel: ag 渠道 baseURL=${baseURL()}（实际请求 ${requestUrlOf(baseURL())}）` +
-      ` 预设=${presetOf(chosen())} 模型=${models().map((m) => m.id).join(',')}`,
+      ` 预设=${presetOf(chosen())} 模型=${models().map((m) => m.id).join(',')} key 数=${agKeys().length}`,
     )
   }
 
-  // 两个地址的自动兜底（只在网络层失败时换，不重复已到达上游的请求）
+  // --- key 轮询拦截器 -----------------------------------------------------
   let guard = { installed: false, uninstall: () => {} }
-  const hosts = () => {
-    const urls = Object.values(URL_PRESETS).map((url) => new URL(url).host)
-    return urls
-  }
   const startGuard = () => {
-    if (guard.installed) return
-    const [first, second] = hosts()
+    if (guard.installed || config.keyRotation === false) return
+    guard = installFetchGuard({
+      engine,
+      log: (level, message) => ctx.logger?.[level]?.(message),
+    })
+  }
+  if (config.enabled !== false) startGuard()
+
+  // --- 地址自动兜底（只在网络层失败时换，不重复已到达上游的请求）--------
+  let failover = { installed: false, uninstall: () => {} }
+  const startFailover = () => {
+    if (failover.installed || config.autoFailover === false) return
+    const [first, second] = presetHosts()
     if (first === undefined || second === undefined) return
-    guard = installUrlFailover({
+    failover = installUrlFailover({
       primaryHost: first,
       fallbackHost: second,
       log: (level, message) => ctx.logger?.[level]?.(message),
     })
   }
-  if (config.enabled !== false && config.autoFailover !== false) startGuard()
+  if (config.enabled !== false) startFailover()
+
+  /** 启动时把池里的当前 key 写进凭据引用（provider 因此不需要改配置）。 */
+  const seedCredential = async () => {
+    if (credentials === null) return
+    const pool = agPool()
+    if (pool.keys.length === 0) return
+    const key = engine.currentKey(pool)
+    if (key === null) return
+    try {
+      const stored = await credentials.resolve?.(pool.credentialRef)
+      const value = stored?.value
+      if (value === undefined || value === '' || pool.keys.includes(value)) {
+        await credentials.set?.(pool.credentialRef, key)
+        ctx.logger?.info?.(`dsh-ag-channel: ${pool.credentialRef} 已指向池里的当前 key`)
+      }
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-ag-channel: 初始化凭据失败: ${error?.message ?? error}`)
+    }
+  }
+  void seedCredential()
+
+  /** 状态文件变了自动重载（加 key 之后不必重启）。 */
+  let lastMtime = 0
+  const reloadIfChanged = () => {
+    try {
+      const mtime = fs.statSync(statePath(home)).mtimeMs
+      if (mtime === lastMtime) return
+      lastMtime = mtime
+      const next = readState(home)
+      state.url = next.url
+      state.keys = next.keys
+      state.models = next.models
+      engine.pools = [agPool(), ...genericPools()]
+      ctx.logger?.info?.(`dsh-ag-channel: 已重载（key 数=${agKeys().length}）`)
+    } catch {
+      // 文件还没建：等下一轮
+    }
+  }
+  try { lastMtime = fs.statSync(statePath(home)).mtimeMs } catch { lastMtime = 0 }
+  const timer = setInterval(reloadIfChanged, 15_000)
+  if (typeof timer.unref === 'function') timer.unref()
 
   ctx.inject(['commands'], (scoped) => {
     scoped.commands.register({
       name: 'ag-channel',
-      description: 'ag 渠道：看当前地址/模型、切换地址',
-      input: { hint: 'status | url <ps|agentrouter|完整端点>' },
+      description: 'ag 渠道：看状态 / 换地址 / 加删 key',
+      input: { hint: 'status | url <ps|agentrouter|完整端点> | add <key> | remove <key> | reset' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const [action = 'status', value] = raw.split(/\s+/)
@@ -152,14 +253,9 @@ export function apply(ctx, config = {}) {
           }
           state.url = value
           writeState(home, state)
-          // 让 llm-pi-ai 重新解析配置：能热重载就热重载，否则提示重启。
           const hmr = ctx.get('hmr')
           if (hmr?.reconcileProfile !== undefined) {
-            try {
-              await hmr.reconcileProfile([])
-            } catch {
-              // 忽略：下面会提示重启
-            }
+            try { await hmr.reconcileProfile([]) } catch { /* 下面提示重启 */ }
           }
           return {
             kind: 'success',
@@ -168,6 +264,44 @@ export function apply(ctx, config = {}) {
           }
         }
 
+        if (action === 'add') {
+          if (typeof value !== 'string' || value.length === 0) {
+            return { kind: 'error', text: '用法：add <key>' }
+          }
+          const keys = agKeys()
+          if (!keys.includes(value)) keys.push(value)
+          state.keys = keys
+          writeState(home, state)
+          engine.pools = [agPool(), ...genericPools()]
+          const pool = agPool()
+          const current = engine.currentKey(pool)
+          if (current !== null) await writeCredential(pool, current)
+          return {
+            kind: 'success',
+            text: `已加入 key ${maskKey(value)}（池里共 ${keys.length} 个）。` +
+              (keys.length === 1 ? '\n提示：再加几个 key，才能在某个 key 没额度时自动切换。' : ''),
+          }
+        }
+
+        if (action === 'remove') {
+          const keys = agKeys()
+          const index = keys.indexOf(value ?? '')
+          if (index < 0) return { kind: 'error', text: '池里没有这个 key。' }
+          keys.splice(index, 1)
+          state.keys = keys
+          writeState(home, state)
+          engine.pools = [agPool(), ...genericPools()]
+          return { kind: 'success', text: `已移除 key ${maskKey(value)}（池里剩 ${keys.length} 个）。` }
+        }
+
+        if (action === 'reset') {
+          const pool = agPool()
+          engine.reset(pool)
+          return { kind: 'success', text: '池里的冷却已全部清除。' }
+        }
+
+        const pool = agPool()
+        const snapshot = engine.snapshot().find((item) => item.id === 'ag')
         const lines = [
           'ag 渠道：',
           `  地址预设: ${presetOf(chosen())}`,
@@ -178,13 +312,29 @@ export function apply(ctx, config = {}) {
           `  请求头: ${JSON.stringify(buildProfile().headers)}`,
           `  模型: ${models().map((m) => m.id).join(', ')}`,
           `  状态文件: ${statePath(home)}`,
+          '',
+          `key 池（${agKeys().length} 个）：`,
         ]
+        for (const key of snapshot?.keys ?? []) {
+          const flags = [
+            key.banned ? '已拉黑' : '',
+            key.cooling > 0 ? `冷却 ${Math.ceil(key.cooling / 1000)}s` : '',
+            key.failures > 0 ? `失败 ${key.failures} 次` : '',
+          ].filter(Boolean).join(' / ')
+          lines.push(`  ${key.key}${flags ? '  [' + flags + ']' : ''}${key.lastError ? '  ' + key.lastError : ''}`)
+        }
+        if (agKeys().length === 0) {
+          lines.push('  （还没有 key —— 用 /ag-channel add <key> 加几个）')
+        }
+        lines.push('', '命令：/ag-channel add <key> | url <ps|agentrouter> | remove <key> | reset')
         return { kind: 'success', text: lines.join('\n') }
       },
     })
   })
 
   ctx.on('dispose', () => {
+    clearInterval(timer)
     guard.uninstall()
+    failover.uninstall()
   })
 }

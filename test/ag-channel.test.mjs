@@ -83,3 +83,15 @@ test('/ag-channel status 能报出当前地址与请求地址', async () => {
   assert.match(out.text, /agentrouter/)
   assert.match(out.text, /https:\/\/agentrouter\.org\/v1\/messages/)
 })
+
+test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', async () => {
+  const ctx = makeCtx()
+  apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false, keyRotation: false })
+  const cmd = ctx.commands.find((item) => item.name === 'ag-channel')
+  const out = await cmd.handler({ rawInput: 'add sk-secret-123456' })
+  assert.equal(out.kind, 'success')
+
+  const saved = JSON.parse(fs.readFileSync(path.join(home, 'ag-channel.json'), 'utf8'))
+  assert.deepEqual(saved.keys, ['sk-secret-123456'])
+  assert.match(out.text, /sk-s…3456|已加入 key/)
+})
