@@ -114,7 +114,7 @@ async function api(path, body) {
   const opts = body === undefined
     ? { headers: { accept: 'application/json' } }
     : { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) }
-  const res = await fetch('/dsh-ag-channel/api/' + path, opts)
+  const res = await fetch('/ar-tuozhan/api/' + path, opts)
   const data = await res.json().catch(() => ({ ok: false, error: '响应不是 JSON' }))
   if (!res.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + res.status))
   return data

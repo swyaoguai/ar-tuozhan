@@ -29,11 +29,11 @@ test('client.js 会向外壳注册，且 factory 返回一个客户端插件', (
   new Function('window', source)(fakeWindow)
 
   assert.ok(loaded, '必须调用 window.__ModuleLoader__.load(...)')
-  assert.equal(loaded.id, 'dsh-ag-channel', 'id 必须是包名')
+  assert.equal(loaded.id, 'ar-tuozhan', 'id 必须是包名')
   assert.equal(typeof loaded.factory, 'function')
 
   const plugin = loaded.factory(() => fakeReact)
-  assert.equal(plugin.name, 'dsh-ag-channel-client')
+  assert.equal(plugin.name, 'ar-tuozhan-client')
   assert.ok(Array.isArray(plugin.inject))
   assert.equal(typeof plugin.apply, 'function')
 })
@@ -55,9 +55,9 @@ test('apply 会往 settings.section 槽里注册一个面板', () => {
 
   const section = registered.find((item) => item.meta.name === 'settings.section')
   assert.ok(section, '应当注册 settings.section 插槽')
-  assert.equal(section.meta.id, 'ag-channel')
+  assert.equal(section.meta.id, 'ar-tuozhan')
   assert.equal(typeof section.meta.label, 'function')
-  assert.equal(section.meta.label(), 'ag 渠道')
+  assert.equal(section.meta.label(), 'ar 套站')
   assert.equal(typeof section.component, 'function')
 })
 
@@ -78,9 +78,9 @@ test('只注册设置分区（不再往模型页注入插槽）', () => {
 
   const section = registered.find((item) => item.meta.name === 'settings.section')
   assert.ok(section, '应当注册 settings.section 插槽')
-  assert.equal(section.meta.id, 'ag-channel')
+  assert.equal(section.meta.id, 'ar-tuozhan')
   assert.equal(typeof section.meta.label, 'function')
-  assert.equal(section.meta.label(), 'ag 渠道')
+  assert.equal(section.meta.label(), 'ar 套站')
   assert.equal(typeof section.component, 'function')
   assert.equal(registered.length, 1, '只注册这一个插槽')
   assert.equal(registered.find((item) => item.meta.name === 'settings.models.provider-card'), undefined, '不再往模型页注入')

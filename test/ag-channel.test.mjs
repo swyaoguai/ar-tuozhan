@@ -1,5 +1,5 @@
 /**
- * 自测：拦截器只改 llm-pi-ai 的 providers.ag，其它 provider 与其它 fiber 一概不碰。
+ * 自测：拦截器只改 llm-pi-ai 的 providers.ar，其它 provider 与其它 fiber 一概不碰。
  *
  *   node test/ag-channel.test.mjs
  */
@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ag-channel-'))
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-tuozhan-'))
 process.env.DSH_HOME = home
 
 const { apply, name } = await import('../index.js')
@@ -121,16 +121,16 @@ test('一个托管路由都没有时，新建一个（默认名 ag）', async ()
   await new Promise((resolve) => setTimeout(resolve, 30))
 
   const providers = ctx.edits.at(-1)?.next?.providers
-  assert.ok(providers.ag, '应当新建 ag')
-  assert.equal(providers.ag.baseURL, 'https://ps.air-outer.com')
-  assert.deepEqual(providers.ag.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
+  assert.ok(providers.ar, '应当新建 ar')
+  assert.equal(providers.ar.baseURL, 'https://ps.air-outer.com')
+  assert.deepEqual(providers.ar.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
   assert.equal(providers.other.baseURL, 'https://ai.1tim.com/v1', '别的路由不碰')
 })
 
 test('/ag-channel status 能报出当前地址与请求地址', async () => {
   const ctx = makeCtx()
   apply(ctx, { enabled: true, url: URL_PRESETS.agentrouter, autoFailover: false })
-  const cmd = ctx.commands.find((item) => item.name === 'ag-channel')
+  const cmd = ctx.commands.find((item) => item.name === 'ar-tuozhan')
   assert.ok(cmd)
   const out = await cmd.handler({ rawInput: 'status' })
   assert.equal(out.kind, 'success')
@@ -141,11 +141,11 @@ test('/ag-channel status 能报出当前地址与请求地址', async () => {
 test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', async () => {
   const ctx = makeCtx()
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false, keyRotation: false })
-  const cmd = ctx.commands.find((item) => item.name === 'ag-channel')
+  const cmd = ctx.commands.find((item) => item.name === 'ar-tuozhan')
   const out = await cmd.handler({ rawInput: 'add sk-secret-123456' })
   assert.equal(out.kind, 'success')
 
-  const saved = JSON.parse(fs.readFileSync(path.join(home, 'ag-channel.json'), 'utf8'))
+  const saved = JSON.parse(fs.readFileSync(path.join(home, 'ar-tuozhan.json'), 'utf8'))
   assert.deepEqual(saved.keys, ['sk-secret-123456'])
   assert.match(out.text, /sk-s…3456|已加入 key/)
 })
@@ -155,7 +155,7 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false, keyRotation: false })
   const routes = ctx.registered
   assert.equal(routes.length, 1, '应当注册一条前缀路由')
-  assert.equal(routes[0].path, '/dsh-ag-channel')
+  assert.equal(routes[0].path, '/ar-tuozhan')
 
   const call = async (method, url, body) => {
     const res = fakeRes()
@@ -163,11 +163,11 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
     return res
   }
 
-  const page = await call('GET', '/dsh-ag-channel/')
+  const page = await call('GET', '/ar-tuozhan/')
   assert.equal(page.status, 200)
   assert.match(page.body, /ag 渠道/)
 
-  const state = await call('GET', '/dsh-ag-channel/api/state')
+  const state = await call('GET', '/ar-tuozhan/api/state')
   assert.equal(state.status, 200)
   const parsed = JSON.parse(state.body)
   assert.equal(parsed.ok, true)
@@ -176,30 +176,30 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
   assert.equal(parsed.headers.originator, 'codex_cli_rs')
 
   const before = JSON.parse(state.body).keys.length
-  const added = await call('POST', '/dsh-ag-channel/api/keys', { key: 'sk-one' })
+  const added = await call('POST', '/ar-tuozhan/api/keys', { key: 'sk-one' })
   assert.equal(added.status, 200)
   assert.equal(JSON.parse(added.body).keys.length, before + 1)
-  const saved = JSON.parse(fs.readFileSync(path.join(home, 'ag-channel.json'), 'utf8'))
+  const saved = JSON.parse(fs.readFileSync(path.join(home, 'ar-tuozhan.json'), 'utf8'))
   assert.ok(saved.keys.includes('sk-one'))
 
-  await call('POST', '/dsh-ag-channel/api/keys', { key: 'sk-two' })
-  const two = JSON.parse((await call('GET', '/dsh-ag-channel/api/state')).body)
+  await call('POST', '/ar-tuozhan/api/keys', { key: 'sk-two' })
+  const two = JSON.parse((await call('GET', '/ar-tuozhan/api/state')).body)
   assert.equal(two.keys.length, before + 2)
 
-  const switched = await call('POST', '/dsh-ag-channel/api/url', { url: 'agentrouter' })
+  const switched = await call('POST', '/ar-tuozhan/api/url', { url: 'agentrouter' })
   assert.equal(JSON.parse(switched.body).baseURL, 'https://agentrouter.org')
   // 地址是写进 profile patch 的（和「设置 → 模型」同一份数据）
-  assert.equal(ctx.edits.at(-1).next.providers.ag.baseURL, 'https://agentrouter.org')
+  assert.equal(ctx.edits.at(-1).next.providers.ar.baseURL, 'https://agentrouter.org')
 
-  const removed = await call('POST', '/dsh-ag-channel/api/keys/remove', { key: 'sk-one' })
+  const removed = await call('POST', '/ar-tuozhan/api/keys/remove', { key: 'sk-one' })
   assert.equal(JSON.parse(removed.body).keys.length, before + 1)
 
   // 写模型
-  const modelsSaved = await call('POST', '/dsh-ag-channel/api/models', {
+  const modelsSaved = await call('POST', '/ar-tuozhan/api/models', {
     models: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar', contextWindow: 256000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: { off: null, low: 'low' } }],
   })
   assert.equal(modelsSaved.status, 200)
-  const written = ctx.edits.at(-1).next.providers.ag.models
+  const written = ctx.edits.at(-1).next.providers.ar.models
   assert.equal(written.length, 1)
   assert.equal(written[0].id, 'gpt-6.1-sol')
   assert.equal(written[0].contextWindow, 256000)
@@ -207,6 +207,6 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
   assert.deepEqual(written[0].input, ['text', 'image'])
   assert.deepEqual(written[0].reasoningEfforts, { off: null, low: 'low' })
 
-  const missing = await call('GET', '/dsh-ag-channel/api/nope')
+  const missing = await call('GET', '/ar-tuozhan/api/nope')
   assert.equal(missing.status, 404)
 })

@@ -1,5 +1,5 @@
 /**
- * dsh-ag-channel 的浏览器半身。
+ * ar-tuozhan 的浏览器半身。
  *
  * 两个入口：
  *   1. 设置 → 模型 → ag 这个 provider 的卡片里：多 key 池（settings.models.provider-card 插槽）
@@ -10,12 +10,12 @@
  * Cordis 客户端插件（{ name, inject, apply }）。外壳只提供 require('react')。
  * 没有构建步骤，也不能在模块顶层做 require/exports —— 全部写在 factory 里。
  *
- * 所有写操作都走宿主提供的 /dsh-ag-channel/api/*（同源，无需鉴权）。
+ * 所有写操作都走宿主提供的 /ar-tuozhan/api/*（同源，无需鉴权）。
  *
  * @module client.js
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-ag-channel',
+  id: 'ar-tuozhan',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback } = React
 
     const inject = ['slots']
-    const API_BASE = '/dsh-ag-channel/api'
+    const API_BASE = '/ar-tuozhan/api'
 
     const S = {
       page: { padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 18 },
@@ -335,13 +335,13 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ */
 
     function apply(ctx) {
-      // 独立分区：设置 → ag 渠道（地址、key 池、模型编辑都在这里）
+      // 独立分区：设置 → ar 套站（地址、key 池、模型编辑都在这里）
       ctx.slots.inject('settings.section', () => ctx.slots.register(
         {
           name: 'settings.section',
-          id: 'ag-channel',
+          id: 'ar-tuozhan',
           order: 43,
-          label: () => 'ag 渠道',
+          label: () => 'ar 套站',
         },
         AgChannelSettings,
       ))
@@ -349,7 +349,7 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply
     exports.inject = inject
-    exports.name = 'dsh-ag-channel-client'
+    exports.name = 'ar-tuozhan-client'
     return module.exports
   },
 })

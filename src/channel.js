@@ -1,7 +1,7 @@
 /**
  * ag 渠道的状态与地址。
  *
- * 状态文件 ~/.dsh/ag-channel.json 里放这个渠道的一切：
+ * 状态文件 ~/.dsh/ar-tuozhan.json 里放这个渠道的一切：
  *   { "url": "https://ps.air-outer.com/v1", "keys": ["sk-…"], "models": [...] }
  *
  * 注意 baseURL 的归一：Anthropic 协议下 pi-ai 走的是官方 SDK，
@@ -36,17 +36,34 @@ export function dshHome(env = process.env) {
 }
 
 export function statePath(home) {
+  return path.join(home, 'ar-tuozhan.json')
+}
+
+/** 旧版本的状态文件（插件改名前）：读新文件时顺手迁移，key 池不丢。 */
+function legacyStatePath(home) {
   return path.join(home, 'ag-channel.json')
 }
 
 export function readState(home) {
+  const file = statePath(home)
   try {
-    const raw = JSON.parse(fs.readFileSync(statePath(home), 'utf8'))
-    if (raw === null || typeof raw !== 'object') return {}
-    return raw
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (raw !== null && typeof raw === 'object') return raw
   } catch {
-    return {}
+    // 新文件还没有 → 看看旧的在不在
   }
+  try {
+    const legacy = legacyStatePath(home)
+    const raw = JSON.parse(fs.readFileSync(legacy, 'utf8'))
+    if (raw !== null && typeof raw === 'object') {
+      // 迁移到新名字
+      try { writeState(home, raw) } catch { /* 迁移失败也不影响读 */ }
+      return raw
+    }
+  } catch {
+    // 旧文件也没有
+  }
+  return {}
 }
 
 export function writeState(home, state) {
