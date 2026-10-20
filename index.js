@@ -82,6 +82,21 @@ export function apply(ctx, config = {}) {
     return fromState ?? fromConfig ?? URL_PRESETS[DEFAULT_PRESET]
   }
   const baseURL = () => resolveBaseURL(chosen())
+  /**
+   * 插件托管的 host：两个预设 + 用户自填的那个。
+   * **以 URL 判定，不以路由 id 判定** —— 渠道叫什么名字（ag / ar / 随便）
+   * 都不影响插件接管它。
+   */
+  const managedHosts = () => {
+    const hosts = new Set(presetHosts())
+    const custom = hostOfBaseURL(normalizeBaseURL(chosen()))
+    if (custom !== '') hosts.add(custom)
+    return hosts
+  }
+  const isManagedUrl = (value) => {
+    const host = hostOfBaseURL(String(value ?? ''))
+    return host !== '' && managedHosts().has(host)
+  }
   const presetOf = (value) => {
     for (const [name, url] of Object.entries(URL_PRESETS)) {
       if (value === name || value === url) return name
@@ -109,9 +124,13 @@ export function apply(ctx, config = {}) {
    * 界面上显示的就是它（用户自己在「设置 → 模型」改过的值优先）。
    */
   let effective = null
+  /** 插件当前接管的路由 id（以 URL 判定得出，不是写死的）。 */
+  let managedId = null
+  /** 所有 baseURL 命中托管 host 的路由 id（界面上给这些路由都挂 key 池）。 */
+  let managedIds = []
 
   /**
-   * 把 ag provider 的字段写进 profile 的 cordis.patch.yml ——
+   * 把托管路由的字段写进 profile 的 cordis.patch.yml ——
    * 走的是「设置 → 模型」背后那个 configEditor 服务：同样的校验、
    * 同样的文件锁、同样的热重载。**单一数据源**：插件界面改的和
    * Models 页改的是同一份东西，谁都不会冲掉谁。
@@ -120,6 +139,7 @@ export function apply(ctx, config = {}) {
   ctx.inject(['configEditor'], (scoped) => {
     configEditor = scoped.configEditor ?? null
   })
+  const managedRouteId = () => managedId ?? (typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : 'ag')
   const writeAgProfile = async (fields) => {
     if (configEditor === null) {
       throw new Error('这个 profile 没有配置编辑器（configEditor），无法写入 provider 配置')
@@ -128,11 +148,12 @@ export function apply(ctx, config = {}) {
     if (entry === undefined) {
       throw new Error('找不到 llm-pi-ai 条目')
     }
+    const id = managedRouteId()
     await configEditor.edit(entry, (current) => ({
       ...current,
       providers: {
         ...(current.providers ?? {}),
-        ag: { ...(current.providers?.ag ?? {}), ...fields },
+        [id]: { ...(current.providers?.[id] ?? {}), ...fields },
       },
     }))
   }
@@ -192,17 +213,30 @@ export function apply(ctx, config = {}) {
   })
 
   if (config.enabled !== false) {
-    // 全局拦截：只认 llm-pi-ai 那个 fiber，只动 providers.ag。
+    // 全局拦截：只认 llm-pi-ai 那个 fiber，只动**托管 host 上的那个路由**。
     //
-    // 合并而不是覆盖：用户在「设置 → 模型」里保存的 ag 配置（模型、名称、
+    // 目标路由以 URL 判定，不以名字判定：baseURL 指向 ps.air-outer.com /
+    // agentrouter.org（或用户自填的那个 host）的路由就是它 —— 叫 ag、ar
+    // 还是别的名字都无所谓。一个都没有时才新建一个。
+    //
+    // 合并而不是覆盖：用户在「设置 → 模型」里保存的配置（模型、名称、
     // 上下文、输出上限、思考强度…）写在 profile 的 patch 里，那份优先；
     // 插件只补齐用户没写的部分（请求头、协议、凭据引用、默认模型列表）。
-    // 这样两边改的是同一份数据，谁都不会把对方冲掉。
     ctx.on('internal/config', function (raw, next) {
       const resolved = next()
       if (!isTargetFiber(this)) return resolved
       const providers = { ...(resolved?.providers ?? {}) }
-      const existing = providers.ag !== null && typeof providers.ag === 'object' ? providers.ag : {}
+      const ids = Object.keys(providers)
+      // 所有指向托管 host 的路由
+      const matching = ids.filter((id) => isManagedUrl(providers[id]?.baseURL))
+      managedIds = matching
+      // 优先接管用户自己改过名的那个；没有就沿用配置里的名字，最后才新建默认的
+      const preferred = typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : undefined
+      const targetId = matching.includes(preferred) ? preferred
+        : matching[0]
+        ?? preferred
+        ?? 'ag'
+      const existing = providers[targetId] !== null && typeof providers[targetId] === 'object' ? providers[targetId] : {}
       const defaults = buildProfile()
       const merged = {
         ...defaults,
@@ -210,13 +244,14 @@ export function apply(ctx, config = {}) {
         models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
         headers: { ...defaults.headers, ...(existing.headers ?? {}) },
       }
-      providers.ag = merged
+      providers[targetId] = merged
+      managedId = targetId
       effective = merged
       return { ...resolved, providers }
     }, { global: true })
 
     ctx.logger?.info?.(
-      `dsh-ag-channel: ag 渠道已接管（默认 baseURL=${baseURL()}，模型=${models().map((m) => m.id).join(',')}，key 数=${agKeys().length}）`,
+      `dsh-ag-channel: 渠道已接管（托管 host=${[...managedHosts()].join(', ')}，模型=${models().map((m) => m.id).join(',')}，key 数=${agKeys().length}）`,
     )
   }
 
@@ -442,6 +477,10 @@ export function apply(ctx, config = {}) {
         models: effective?.models ?? models(),
         keys,
         poolId: 'ag',
+        // 托管的路由：按 URL 判定出来的，不是写死 id
+        managedId: managedRouteId(),
+        managedIds,
+        managedHosts: [...managedHosts()],
         canWriteProfile: configEditor !== null,
       }
     }

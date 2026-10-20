@@ -143,36 +143,64 @@ test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', as
   assert.match(out.text, /sk-s…3456|已加入 key/)
 })
 
-test('用户在「设置 → 模型」里保存的 ag 配置优先于插件默认值（不会被插件冲掉）', () => {
+test('用户在「设置 → 模型」里保存的配置优先于插件默认值（不会被插件冲掉）', () => {
   const ctx = makeCtx()
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, apiKeyEnv: 'AG_API_KEY', originator: 'codex_cli_rs', autoFailover: false })
 
-  // 模拟 profile patch 里已有 providers.ag（用户在 Models 页改过）
+  // 模拟 profile patch 里已有 providers.ar（用户在 Models 页改过，名字不叫 ag）
   const raw = {
     providers: {
-      ag: {
+      ar: {
         apiKeyEnv: 'AG_API_KEY',
         api: 'anthropic-messages',
         baseURL: 'https://ps.air-outer.com',
         models: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar', contextWindow: 256000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high' } }],
-        displayName: '我的 ag',
+        displayName: '我的渠道',
       },
     },
   }
   const out = ctx.hooks[0].call(LLM_PI_AI_FIBER, raw, () => raw)
-  const ag = out.providers.ag
+  const ag = out.providers.ar
 
+  assert.equal(out.providers.ag, undefined, '不该凭空多出一个 ag 路由')
   assert.equal(ag.models.length, 1, '用户自己的模型列表要原样保留')
   assert.equal(ag.models[0].name, 'gpt-6.1-sol-ar')
   assert.equal(ag.models[0].contextWindow, 256000)
   assert.equal(ag.models[0].maxTokens, 32000)
   assert.deepEqual(ag.models[0].input, ['text', 'image'])
   assert.deepEqual(ag.models[0].reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high' })
-  assert.equal(ag.displayName, '我的 ag')
+  assert.equal(ag.displayName, '我的渠道')
   assert.equal(ag.baseURL, 'https://ps.air-outer.com')
   // 插件补齐用户没写的部分
   assert.equal(ag.headers.originator, 'codex_cli_rs', 'originator 头要补上')
   assert.equal(ag.api, 'anthropic-messages')
+})
+
+test('以 URL 判定托管路由：叫 ar / 随便什么名字都认，其它 host 一概不碰', () => {
+  const ctx = makeCtx()
+  apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false })
+  const raw = {
+    providers: {
+      ar: { apiKeyEnv: 'X', api: 'anthropic-messages', baseURL: 'https://agentrouter.org', models: [{ id: 'm' }] },
+      other: { apiKeyEnv: 'Y', api: 'openai-completions', baseURL: 'https://ai.1tim.com/v1', models: [{ id: 'm2' }] },
+    },
+  }
+  const out = ctx.hooks[0].call(LLM_PI_AI_FIBER, raw, () => raw)
+
+  assert.equal(out.providers.ar.headers.originator, 'codex_cli_rs', '托管 host 上的路由要被接管')
+  assert.deepEqual(out.providers.other, raw.providers.other, '别的 host 一概不碰')
+  assert.equal(out.providers.ag, undefined, '不该凭空多出一个 ag 路由')
+})
+
+test('一个托管路由都没有时才新建一个（默认名 ag）', () => {
+  const ctx = makeCtx()
+  apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false })
+  const raw = { providers: { other: { apiKeyEnv: 'Y', api: 'openai-completions', baseURL: 'https://ai.1tim.com/v1', models: [{ id: 'm2' }] } } }
+  const out = ctx.hooks[0].call(LLM_PI_AI_FIBER, raw, () => raw)
+  assert.ok(out.providers.ag, '没有托管路由时应新建一个')
+  assert.equal(out.providers.ag.baseURL, 'https://ps.air-outer.com')
+  assert.deepEqual(out.providers.ag.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
+  assert.deepEqual(out.providers.other, raw.providers.other)
 })
 
 test('没保存过 ag 时用插件默认模型', () => {

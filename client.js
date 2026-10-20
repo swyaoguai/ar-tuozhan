@@ -59,12 +59,10 @@ window.__ModuleLoader__.load({
     /* key 池（模型页与设置分区共用）                                        */
     /* ------------------------------------------------------------------ */
 
-    function KeyPoolWidget({ compact = false }) {
+    /** 读一次插件状态（渠道、key 池、模型、托管路由名单）。 */
+    function useAgState() {
       const [state, setState] = useState(null)
       const [error, setError] = useState(null)
-      const [newKey, setNewKey] = useState('')
-      const [busy, setBusy] = useState(false)
-
       const load = useCallback(async () => {
         try {
           setState(await api('state'))
@@ -73,12 +71,18 @@ window.__ModuleLoader__.load({
           setError(e.message)
         }
       }, [])
-
       useEffect(() => { load() }, [load])
+      return [state, error, load]
+    }
+
+    function KeyPoolWidget({ compact = false }) {
+      const [state, error, load] = useAgState()
+      const [newKey, setNewKey] = useState('')
+      const [busy, setBusy] = useState(false)
 
       const run = useCallback(async (fn) => {
         setBusy(true)
-        try { await fn(); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
+        try { await fn(); await load() } catch (e) { /* load 里的 error 会显示 */ } finally { setBusy(false) }
       }, [load])
 
       const addKey = () => {
@@ -271,24 +275,12 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ */
 
     function AgChannelSettings() {
-      const [state, setState] = useState(null)
-      const [error, setError] = useState(null)
+      const [state, error, load] = useAgState()
       const [busy, setBusy] = useState(false)
-
-      const load = useCallback(async () => {
-        try {
-          setState(await api('state'))
-          setError(null)
-        } catch (e) {
-          setError(e.message)
-        }
-      }, [])
-
-      useEffect(() => { load() }, [load])
 
       const run = useCallback(async (fn) => {
         setBusy(true)
-        try { await fn(); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
+        try { await fn(); await load() } catch (e) { /* load 里的 error 会显示 */ } finally { setBusy(false) }
       }, [load])
 
       if (error && !state) {
@@ -339,19 +331,24 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ */
-    /* 模型页里的 ag 卡片：多 key 池                                        */
+    /* 模型页里的托管渠道卡片：多 key 池                                    */
     /* ------------------------------------------------------------------ */
 
-    /** 这一行是不是 ag 渠道？ */
-    function isAgProvider(entry) {
-      if (entry === null || entry === undefined || typeof entry !== 'object') return false
-      if (Array.isArray(entry.settingsPath) && entry.settingsPath.join('.') === 'providers.ag') return true
-      return entry.provider === 'ag'
+    /** 这张卡片对应的路由 id（Models 页给的是条目，id 在 provider / settingsPath 里）。 */
+    function routeIdOf(entry) {
+      if (entry === null || entry === undefined || typeof entry !== 'object') return undefined
+      if (typeof entry.provider === 'string' && entry.provider.length > 0) return entry.provider
+      if (Array.isArray(entry.settingsPath) && typeof entry.settingsPath[1] === 'string') return entry.settingsPath[1]
+      return undefined
     }
 
     function AgProviderCard(props) {
-      const entry = props?.provider
-      if (!isAgProvider(entry)) return null
+      const [state] = useAgState()
+      const id = routeIdOf(props?.provider)
+      // 托管哪些路由由宿主按 URL 判定（不写死名字），这里只对照名单
+      if (!state || !id) return null
+      const managed = state.managedIds ?? []
+      if (!managed.includes(id)) return null
       return h('div', {
         style: {
           marginTop: 12, padding: 12, borderRadius: 10,
@@ -360,7 +357,7 @@ window.__ModuleLoader__.load({
         },
       },
         h('p', { style: { ...S.hint, margin: 0 } },
-          'ag 渠道的 key 池：在这里加多个 key，某个 key 没额度时会自动切下一个并重发当前请求。'),
+          `渠道 ${id} 的 key 池：在这里加多个 key，某个 key 没额度时会自动切下一个并重发当前请求。`),
         h(KeyPoolWidget, { compact: true }),
       )
     }

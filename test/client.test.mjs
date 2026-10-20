@@ -9,11 +9,15 @@ import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
-/** 极简 React 替身：client 只用到这几个导出。 */
+/**
+ * 极简 React 替身：client 只用到这几个导出。
+ * reactState.override 可以预置 useState 的返回值（模拟宿主返回的状态）。
+ */
+const reactState = { override: null }
 const fakeReact = {
   // 返回一个可辨识的对象，这样「渲染出了东西」和「返回 null」能区分开
   createElement: (type, props) => ({ type, props }),
-  useState: (initial) => [initial, () => {}],
+  useState: (initial) => [reactState.override ?? initial, () => {}],
   useEffect: () => {},
   useCallback: (fn) => fn,
 }
@@ -57,7 +61,7 @@ test('apply 会往 settings.section 槽里注册一个面板', () => {
   assert.equal(typeof section.component, 'function')
 })
 
-test('模型页插槽：只给 ag 这个 provider 渲染 key 池', () => {
+test('模型页插槽：只给托管 host 上的路由渲染 key 池（按 URL 判定，不看名字）', () => {
   let loaded = null
   const fakeWindow = { __ModuleLoader__: { load: (arg) => { loaded = arg } } }
   new Function('window', source)(fakeWindow)
@@ -75,11 +79,15 @@ test('模型页插槽：只给 ag 这个 provider 渲染 key 池', () => {
   const card = registered.find((item) => item.meta.name === 'settings.models.provider-card')
   assert.ok(card, '应当注册 settings.models.provider-card 插槽')
 
-  // 不是 ag 的 provider → 不渲染
-  assert.equal(card.component({ provider: { provider: 'ar', settingsPath: ['providers', 'ar'] } }), null)
-  assert.equal(card.component({ provider: { provider: 'minimax-cn' } }), null)
+  // 宿主按 URL 判定出来的托管路由名单：这里叫 ar
+  reactState.override = { managedIds: ['ar'], keys: [] }
+
+  // 名单外的 provider → 不渲染
+  assert.equal(card.component({ provider: { provider: 'minimax-cn', settingsPath: ['providers', 'minimax-cn'] } }), null)
+  assert.equal(card.component({ provider: { provider: 'ag', settingsPath: ['providers', 'ag'] } }), null)
   assert.equal(card.component({}), null)
-  // ag → 渲染出东西
-  const rendered = card.component({ provider: { provider: 'ag', settingsPath: ['providers', 'ag'] } })
+  // 名单内的 → 渲染出东西（名字叫什么都行）
+  const rendered = card.component({ provider: { provider: 'ar', settingsPath: ['providers', 'ar'] } })
   assert.notEqual(rendered, null)
+  reactState.override = null
 })
