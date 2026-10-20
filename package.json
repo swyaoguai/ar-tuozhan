@@ -1,6 +1,6 @@
 {
   "name": "dsh-ag-channel",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "description": "DSH 插件：只接管 ag 这一个模型渠道（agentrouter / ps.air-outer），带上 originator 请求头、四个模型、两个可切换的地址，并内置 API Key 轮询（额度耗尽自动换下一个 key 并重试）+ 可视化管理界面。",
   "main": "./index.js",

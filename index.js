@@ -158,6 +158,29 @@ export function apply(ctx, config = {}) {
     }))
   }
 
+  /**
+   * 按 URL 找出用户自己建的那些「指向托管 host 的路由」。
+   *
+   * 读的是 profile patch 里 llm-pi-ai 那一条的真实内容（configEditor 的
+   * override 视角）—— 不依赖插件加载时机的先后，也不依赖配置解析那一刻
+   * 能看到什么。路由叫什么名字都不影响：叫 ag、ar、随便什么都认。
+   */
+  const discoverManagedRoutes = () => {
+    const found = []
+    if (configEditor !== null) {
+      try {
+        const row = configEditor.configuration().find((item) => item.entry.options.id === 'llm-pi-ai')
+        const providers = row?.override?.providers ?? {}
+        for (const [id, profile] of Object.entries(providers)) {
+          if (profile !== null && typeof profile === 'object' && isManagedUrl(profile.baseURL)) found.push(id)
+        }
+      } catch {
+        // 配置还没准备好：下一轮再找
+      }
+    }
+    return found
+  }
+
   /** 通用 key 池（其它渠道用），从 ~/.dsh/key-pool.json 读。 */
   const genericPools = () => readPools(home, poolConfigPath(home))
 
@@ -226,14 +249,15 @@ export function apply(ctx, config = {}) {
       const resolved = next()
       if (!isTargetFiber(this)) return resolved
       const providers = { ...(resolved?.providers ?? {}) }
-      const ids = Object.keys(providers)
-      // 所有指向托管 host 的路由
-      const matching = ids.filter((id) => isManagedUrl(providers[id]?.baseURL))
-      managedIds = matching
-      // 优先接管用户自己改过名的那个；没有就沿用配置里的名字，最后才新建默认的
+      // 目标路由：先看配置里有没有 baseURL 命中托管 host 的；没有就用
+      // profile patch 里认出的那个（用户自己建、改过名的那个）。
+      const fromConfig = Object.keys(providers).filter((id) => isManagedUrl(providers[id]?.baseURL))
+      const fromPatch = discoverManagedRoutes()
+      const known = [...new Set([...fromConfig, ...fromPatch])]
+      managedIds = known
       const preferred = typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : undefined
-      const targetId = matching.includes(preferred) ? preferred
-        : matching[0]
+      const targetId = known.includes(preferred) ? preferred
+        : known[0]
         ?? preferred
         ?? 'ag'
       const existing = providers[targetId] !== null && typeof providers[targetId] === 'object' ? providers[targetId] : {}
@@ -280,6 +304,57 @@ export function apply(ctx, config = {}) {
   }
   if (config.enabled !== false) startFailover()
 
+  /**
+   * 启动时把插件的缺项补进 profile 里那个托管路由：
+   *   - 路由不存在 → 用插件默认值建一个（名字可在设置里改）
+   *   - 路由存在   → 只补用户没写的（请求头、协议），模型等一律不动
+   *
+   * 写进去之后 Models 页就能看见这个渠道（带 key 池面板），
+   * 插件的字段也真正落在配置里 —— 不再依赖「拦截那一刻看到了什么」。
+   */
+  const ensureManagedRoute = async () => {
+    if (configEditor === null) return
+    const found = discoverManagedRoutes()
+    const defaults = buildProfile()
+    const id = found[0] ?? (typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : 'ag')
+    const entry = configEditor.entries().find((item) => item.options.id === 'llm-pi-ai')
+    if (entry === undefined) return
+    const current = entry.options.config?.providers?.[id]
+    const missing = current === undefined
+      || current.api !== defaults.api
+      || (current.headers?.originator ?? defaults.headers.originator) !== defaults.headers.originator
+    if (!missing) {
+      managedIds = found
+      managedId = found[0] ?? id
+      return
+    }
+    try {
+      await configEditor.edit(entry, (raw) => {
+        const providers = raw.providers ?? {}
+        const existing = providers[id] ?? {}
+        return {
+          ...raw,
+          providers: {
+            ...providers,
+            [id]: {
+              ...existing,
+              api: existing.api ?? defaults.api,
+              baseURL: existing.baseURL ?? defaults.baseURL,
+              models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
+              headers: { ...defaults.headers, ...(existing.headers ?? {}) },
+            },
+          },
+        }
+      })
+      managedIds = [id, ...found.filter((item) => item !== id)]
+      managedId = id
+      ctx.logger?.info?.(`dsh-ag-channel: 已在 profile 里就位托管路由「${id}」`)
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-ag-channel: 写入托管路由失败: ${error?.message ?? error}`)
+    }
+  }
+  void ensureManagedRoute()
+
   /** 启动时把池里的当前 key 写进凭据引用（provider 因此不需要改配置）。 */
   const seedCredential = async () => {
     if (credentials === null) return
@@ -318,7 +393,13 @@ export function apply(ctx, config = {}) {
     }
   }
   try { lastMtime = fs.statSync(statePath(home)).mtimeMs } catch { lastMtime = 0 }
-  const timer = setInterval(reloadIfChanged, 15_000)
+  const timer = setInterval(() => {
+    reloadIfChanged()
+    // 托管路由名单跟着 profile 走：用户在 Models 页新建/改名/改地址后，
+    // 这里会重新按 URL 认一遍，key 池面板也就跟着挂到正确的行上。
+    const found = discoverManagedRoutes()
+    if (found.length > 0 || managedIds.length === 0) managedIds = found
+  }, 15_000)
   if (typeof timer.unref === 'function') timer.unref()
 
   ctx.inject(['commands'], (scoped) => {
