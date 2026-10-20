@@ -159,24 +159,28 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * profile patch 里 llm-pi-ai 那一条的真实 providers（用户自己写的那些路由）。
+   * 这是配置的真源：Models 页改的就是它，运行时读到的也是它。
+   */
+  const patchProviders = () => {
+    if (configEditor === null) return {}
+    try {
+      const row = configEditor.configuration().find((item) => item.entry.options.id === 'llm-pi-ai')
+      const providers = row?.override?.providers
+      return providers !== null && typeof providers === 'object' ? providers : {}
+    } catch {
+      return {}
+    }
+  }
+
+  /**
    * 按 URL 找出用户自己建的那些「指向托管 host 的路由」。
-   *
-   * 读的是 profile patch 里 llm-pi-ai 那一条的真实内容（configEditor 的
-   * override 视角）—— 不依赖插件加载时机的先后，也不依赖配置解析那一刻
-   * 能看到什么。路由叫什么名字都不影响：叫 ag、ar、随便什么都认。
+   * 路由叫什么名字都不影响：叫 ag、ar、随便什么都认。
    */
   const discoverManagedRoutes = () => {
     const found = []
-    if (configEditor !== null) {
-      try {
-        const row = configEditor.configuration().find((item) => item.entry.options.id === 'llm-pi-ai')
-        const providers = row?.override?.providers ?? {}
-        for (const [id, profile] of Object.entries(providers)) {
-          if (profile !== null && typeof profile === 'object' && isManagedUrl(profile.baseURL)) found.push(id)
-        }
-      } catch {
-        // 配置还没准备好：下一轮再找
-      }
+    for (const [id, profile] of Object.entries(patchProviders())) {
+      if (profile !== null && typeof profile === 'object' && isManagedUrl(profile.baseURL)) found.push(id)
     }
     return found
   }
@@ -236,44 +240,9 @@ export function apply(ctx, config = {}) {
   })
 
   if (config.enabled !== false) {
-    // 全局拦截：只认 llm-pi-ai 那个 fiber，只动**托管 host 上的那个路由**。
-    //
-    // 目标路由以 URL 判定，不以名字判定：baseURL 指向 ps.air-outer.com /
-    // agentrouter.org（或用户自填的那个 host）的路由就是它 —— 叫 ag、ar
-    // 还是别的名字都无所谓。一个都没有时才新建一个。
-    //
-    // 合并而不是覆盖：用户在「设置 → 模型」里保存的配置（模型、名称、
-    // 上下文、输出上限、思考强度…）写在 profile 的 patch 里，那份优先；
-    // 插件只补齐用户没写的部分（请求头、协议、凭据引用、默认模型列表）。
-    ctx.on('internal/config', function (raw, next) {
-      const resolved = next()
-      if (!isTargetFiber(this)) return resolved
-      const providers = { ...(resolved?.providers ?? {}) }
-      // 目标路由：先看配置里有没有 baseURL 命中托管 host 的；没有就用
-      // profile patch 里认出的那个（用户自己建、改过名的那个）。
-      const fromConfig = Object.keys(providers).filter((id) => isManagedUrl(providers[id]?.baseURL))
-      const fromPatch = discoverManagedRoutes()
-      const known = [...new Set([...fromConfig, ...fromPatch])]
-      managedIds = known
-      const preferred = typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : undefined
-      const targetId = known.includes(preferred) ? preferred
-        : known[0]
-        ?? preferred
-        ?? 'ag'
-      const existing = providers[targetId] !== null && typeof providers[targetId] === 'object' ? providers[targetId] : {}
-      const defaults = buildProfile()
-      const merged = {
-        ...defaults,
-        ...existing,
-        models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
-        headers: { ...defaults.headers, ...(existing.headers ?? {}) },
-      }
-      providers[targetId] = merged
-      managedId = targetId
-      effective = merged
-      return { ...resolved, providers }
-    }, { global: true })
-
+    // 不用运行时拦截：profile 的 patch 就是 llm-pi-ai 配置的真源，
+    // 插件直接把托管路由补齐写进 patch（见 ensureManagedRoute），
+    // 运行时就自然带着插件的请求头与模型。
     ctx.logger?.info?.(
       `dsh-ag-channel: 渠道已接管（托管 host=${[...managedHosts()].join(', ')}，模型=${models().map((m) => m.id).join(',')}，key 数=${agKeys().length}）`,
     )
@@ -305,49 +274,45 @@ export function apply(ctx, config = {}) {
   if (config.enabled !== false) startFailover()
 
   /**
-   * 启动时把插件的缺项补进 profile 里那个托管路由：
+   * 把插件的缺项补进 profile 里那个托管路由：
    *   - 路由不存在 → 用插件默认值建一个（名字可在设置里改）
-   *   - 路由存在   → 只补用户没写的（请求头、协议），模型等一律不动
+   *   - 路由存在   → 只补用户没写的（协议、请求头），模型等一律不动
    *
-   * 写进去之后 Models 页就能看见这个渠道（带 key 池面板），
-   * 插件的字段也真正落在配置里 —— 不再依赖「拦截那一刻看到了什么」。
+   * 写进 patch 之后，运行时读到的就是它 —— Models 页看得见、也能编辑，
+   * 插件的 originator 请求头也真的生效。
    */
   const ensureManagedRoute = async () => {
     if (configEditor === null) return
-    const found = discoverManagedRoutes()
+    const providers = patchProviders()
+    const found = Object.keys(providers).filter((id) => isManagedUrl(providers[id]?.baseURL))
     const defaults = buildProfile()
-    const id = found[0] ?? (typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : 'ag')
+    const preferred = typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : undefined
+    const id = found.includes(preferred) ? preferred
+      : found[0]
+      ?? preferred
+      ?? 'ag'
+    const existing = providers[id] ?? {}
+    const wanted = {
+      ...existing,
+      api: existing.api ?? defaults.api,
+      baseURL: existing.baseURL ?? defaults.baseURL,
+      models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
+      headers: { ...defaults.headers, ...(existing.headers ?? {}) },
+    }
+    const same = JSON.stringify(existing) === JSON.stringify(wanted)
+    managedIds = found.length > 0 ? found : [id]
+    managedId = id
+    if (same) return
     const entry = configEditor.entries().find((item) => item.options.id === 'llm-pi-ai')
     if (entry === undefined) return
-    const current = entry.options.config?.providers?.[id]
-    const missing = current === undefined
-      || current.api !== defaults.api
-      || (current.headers?.originator ?? defaults.headers.originator) !== defaults.headers.originator
-    if (!missing) {
-      managedIds = found
-      managedId = found[0] ?? id
-      return
-    }
     try {
-      await configEditor.edit(entry, (raw) => {
-        const providers = raw.providers ?? {}
-        const existing = providers[id] ?? {}
-        return {
-          ...raw,
-          providers: {
-            ...providers,
-            [id]: {
-              ...existing,
-              api: existing.api ?? defaults.api,
-              baseURL: existing.baseURL ?? defaults.baseURL,
-              models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
-              headers: { ...defaults.headers, ...(existing.headers ?? {}) },
-            },
-          },
-        }
-      })
-      managedIds = [id, ...found.filter((item) => item !== id)]
-      managedId = id
+      await configEditor.edit(entry, (raw) => ({
+        ...raw,
+        providers: {
+          ...(raw.providers ?? {}),
+          [id]: wanted,
+        },
+      }))
       ctx.logger?.info?.(`dsh-ag-channel: 已在 profile 里就位托管路由「${id}」`)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-ag-channel: 写入托管路由失败: ${error?.message ?? error}`)
@@ -393,12 +358,19 @@ export function apply(ctx, config = {}) {
     }
   }
   try { lastMtime = fs.statSync(statePath(home)).mtimeMs } catch { lastMtime = 0 }
+  let lastEnsured = ''
   const timer = setInterval(() => {
     reloadIfChanged()
-    // 托管路由名单跟着 profile 走：用户在 Models 页新建/改名/改地址后，
-    // 这里会重新按 URL 认一遍，key 池面板也就跟着挂到正确的行上。
+    // 托管路由跟着 profile 走：用户在 Models 页新建/改名/改地址后，
+    // 这里会重新按 URL 认一遍，key 池面板也就跟着挂到正确的行上；
+    // 同时把插件的缺项（协议、originator 头）补齐。
     const found = discoverManagedRoutes()
     if (found.length > 0 || managedIds.length === 0) managedIds = found
+    const signature = found.join(',')
+    if (signature !== lastEnsured) {
+      lastEnsured = signature
+      void ensureManagedRoute()
+    }
   }, 15_000)
   if (typeof timer.unref === 'function') timer.unref()
 
@@ -547,20 +519,25 @@ export function apply(ctx, config = {}) {
         cooling: key.cooling,
         lastError: key.lastError,
       }))
+      // 托管路由的生效配置直接读 profile patch（真源），不是内存里的副本
+      const providers = patchProviders()
+      const found = Object.keys(providers).filter((id) => isManagedUrl(providers[id]?.baseURL))
+      const route = providers[found[0]] ?? {}
+      const defaults = buildProfile()
       return {
         ok: true,
         url: chosen(),
         preset: presetOf(chosen()),
-        baseURL: effective?.baseURL ?? baseURL(),
-        requestUrl: requestUrlOf(effective?.baseURL ?? baseURL()),
-        credentialRef: effective?.apiKeyEnv ?? buildProfile().apiKeyEnv,
-        headers: effective?.headers ?? buildProfile().headers,
-        models: effective?.models ?? models(),
+        baseURL: route.baseURL ?? defaults.baseURL,
+        requestUrl: requestUrlOf(route.baseURL ?? defaults.baseURL),
+        credentialRef: route.apiKeyEnv ?? defaults.apiKeyEnv,
+        headers: route.headers ?? defaults.headers,
+        models: route.models ?? defaults.models,
         keys,
         poolId: 'ag',
         // 托管的路由：按 URL 判定出来的，不是写死 id
-        managedId: managedRouteId(),
-        managedIds,
+        managedId: found[0] ?? managedRouteId(),
+        managedIds: found.length > 0 ? found : managedIds,
         managedHosts: [...managedHosts()],
         canWriteProfile: configEditor !== null,
       }
