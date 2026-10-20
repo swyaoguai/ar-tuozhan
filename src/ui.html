@@ -152,11 +152,19 @@ function render() {
     html += '<td class="mono">' + escapeHtml(key.mask) + (key.lastError ? '<div class="hint" style="margin:2px 0 0">' + escapeHtml(key.lastError.slice(0, 120)) + '</div>' : '') + '</td>'
     html += '<td><span class="pill ' + st.cls + '">' + st.text + '</span></td>'
     html += '<td>' + (key.current ? '<span class="pill ok">使用中</span>' : '') + '</td>'
-    html += '<td style="text-align:right"><button class="ghost danger" data-del="' + escapeHtml(key.full) + '">删除</button></td>'
+    html += '<td style="text-align:right; white-space:nowrap">'
+    html += '<button class="ghost" data-use="' + escapeHtml(key.full) + '"' + (key.current ? ' disabled' : '') + '>' + (key.current ? '优先中' : '优先') + '</button> '
+    html += '<button class="ghost danger" data-del="' + escapeHtml(key.full) + '">删除</button></td>'
     html += '</tr>'
   }
   html += '</tbody></table>'
   table.innerHTML = html
+  for (const btn of table.querySelectorAll('button[data-use]')) {
+    btn.addEventListener('click', async () => {
+      try { await api('keys/current', { key: btn.dataset.use }); await load(); toast('已设为优先') }
+      catch (e) { toast(e.message, true) }
+    })
+  }
   for (const btn of table.querySelectorAll('button[data-del]')) {
     btn.addEventListener('click', async () => {
       try { await api('keys/remove', { key: btn.dataset.del }); await load(); toast('已删除') }

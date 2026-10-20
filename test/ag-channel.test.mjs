@@ -194,6 +194,16 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
   const removed = await call('POST', '/ar-tuozhan/api/keys/remove', { key: 'sk-one' })
   assert.equal(JSON.parse(removed.body).keys.length, before + 1)
 
+  // 手动指定优先使用的 key
+  const preferred = await call('POST', '/ar-tuozhan/api/keys/current', { key: 'sk-two' })
+  assert.equal(preferred.status, 200)
+  const afterPick = JSON.parse(preferred.body)
+  const picked = afterPick.keys.find((key) => key.full === 'sk-two')
+  assert.equal(picked.current, true, '被指定的 key 应当成为使用中的那个')
+  // 不在池里的 key 不行
+  const bad = await call('POST', '/ar-tuozhan/api/keys/current', { key: 'sk-nope' })
+  assert.equal(bad.status, 400)
+
   // 写模型
   const modelsSaved = await call('POST', '/ar-tuozhan/api/models', {
     models: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar', contextWindow: 256000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: { off: null, low: 'low' } }],

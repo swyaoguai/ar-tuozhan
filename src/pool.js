@@ -187,6 +187,23 @@ export class KeyPoolEngine {
     this.persist()
   }
 
+  /**
+   * 手动指定优先使用的 key（用户在界面上点「优先」）。
+   * 被指定的 key 立刻成为当前 key；若它还在冷却里，冷却也一并解除。
+   */
+  setCurrent(pool, key) {
+    if (!pool.keys.includes(key)) return null
+    const record = this.keyState(pool, key)
+    record.cooldownUntil = 0
+    record.banned = false
+    const entry = this.stateOf(pool)
+    const previous = entry.current ?? ''
+    entry.current = key
+    this.persist()
+    this.onRotate({ pool, key, previous, kind: 'manual' })
+    return key
+  }
+
   /** 给人看的状态快照。 */
   snapshot() {
     const now = this.now()

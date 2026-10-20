@@ -441,6 +441,17 @@ export function apply(ctx, config = {}) {
           }
         }
 
+        if (action === 'use') {
+          if (typeof value !== 'string' || value.length === 0) {
+            return { kind: 'error', text: '用法：use <key>' }
+          }
+          const pool = arPool()
+          const picked = engine.setCurrent(pool, value)
+          if (picked === null) return { kind: 'error', text: '池里没有这个 key。' }
+          await writeCredential(pool, picked)
+          return { kind: 'success', text: `已把 ${maskKey(picked)} 设为优先使用的 key。` }
+        }
+
         if (action === 'remove') {
           const keys = arKeys()
           const index = keys.indexOf(value ?? '')
@@ -571,6 +582,16 @@ export function apply(ctx, config = {}) {
           const pool = arPool()
           const current = engine.currentKey(pool)
           if (current !== null) await writeCredential(pool, current)
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
+        if (req.method === 'POST' && sub === 'api/keys/current') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const key = typeof body.key === 'string' ? body.key : ''
+          const pool = arPool()
+          const picked = engine.setCurrent(pool, key)
+          if (picked === null) { sendJson(res, 400, { ok: false, error: '池里没有这个 key' }); return }
+          await writeCredential(pool, picked)
           sendJson(res, 200, stateSnapshot())
           return
         }

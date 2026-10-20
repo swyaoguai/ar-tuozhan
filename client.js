@@ -127,6 +127,12 @@ window.__ModuleLoader__.load({
               !key.banned && key.cooling > 0 ? pill(`冷却 ${Math.ceil(key.cooling / 1000)}s`, '#f08c00') : null,
               !key.banned && key.cooling === 0 && key.failures > 0 ? pill(`失败 ${key.failures} 次`, '#f08c00') : null,
               h('button', {
+                style: { ...S.btnGhost },
+                disabled: busy || key.current === true,
+                title: key.current ? '当前优先使用的 key' : '设为优先使用的 key',
+                onClick: () => run(() => api('keys/current', { key: key.full })),
+              }, key.current ? '优先中' : '优先'),
+              h('button', {
                 style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
                 disabled: busy,
                 onClick: () => run(() => api('keys/remove', { key: key.full })),
