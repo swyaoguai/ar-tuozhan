@@ -22,6 +22,8 @@
  * @module index.js
  */
 import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_MODELS, DEFAULT_PRESET, URL_PRESETS, dshHome, hostOfBaseURL, normalizeBaseURL,
   presetHosts, readState, requestUrlOf, resolveBaseURL, statePath, writeState,
@@ -151,9 +153,9 @@ export function apply(ctx, config = {}) {
     baseURL: baseURL(),
     models: models(),
     headers: {
-      ...(typeof config.originator === 'string' && config.originator.length > 0 ? { originator: config.originator } : {}),
+      ...(typeof config.originator === 'string' && config.originator.length > 0 ? { originator: config.originator } : { originator: 'codex_cli_rs' }),
     },
-    ...(typeof config.displayName === 'string' && config.displayName.length > 0 ? { displayName: config.displayName } : {}),
+    ...(typeof config.displayName === 'string' && config.displayName.length > 0 ? { displayName: config.displayName } : { displayName: 'ag' }),
   })
 
   if (config.enabled !== false) {
@@ -330,6 +332,120 @@ export function apply(ctx, config = {}) {
         return { kind: 'success', text: lines.join('\n') }
       },
     })
+  })
+
+  // --- 管理界面（webServer：JSON API + 独立页面）----------------------
+  // 页面：/dsh-ag-channel/        API：/dsh-ag-channel/api/*
+  ctx.inject(['webServer'], (scoped) => {
+    const server = scoped.webServer
+    const PKG_DIR = fileURLToPath(new URL('./', import.meta.url))
+    const sendJson = (res, status, obj) => {
+      const payload = JSON.stringify(obj)
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(payload)
+    }
+    const readBody = (req) => new Promise((resolve) => {
+      const chunks = []
+      let size = 0
+      req.on('data', (chunk) => {
+        size += chunk.length
+        if (size > 200_000) { try { req.destroy() } catch { /* ignore */ } chunks.length = 0; resolve(''); return }
+        chunks.push(chunk)
+      })
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      req.on('error', () => resolve(''))
+    })
+
+    /** 给界面看的完整状态。 */
+    const stateSnapshot = () => {
+      const enginePool = engine.snapshot().find((item) => item.id === 'ag')
+      const keys = (enginePool?.keys ?? []).map((key) => ({
+        mask: key.key,
+        full: key.full,
+        current: enginePool?.current === key.full,
+        banned: key.banned,
+        failures: key.failures,
+        cooling: key.cooling,
+        lastError: key.lastError,
+      }))
+      return {
+        ok: true,
+        url: chosen(),
+        preset: presetOf(chosen()),
+        baseURL: baseURL(),
+        requestUrl: requestUrlOf(baseURL()),
+        credentialRef: buildProfile().apiKeyEnv,
+        headers: buildProfile().headers,
+        models: models(),
+        keys,
+        poolId: 'ag',
+      }
+    }
+
+    const handler = async (req, res) => {
+      try {
+        const url = new URL(req.url, 'http://localhost')
+        const sub = url.pathname.replace(/^\/dsh-ag-channel\/?/, '').replace(/\/+$/, '')
+        if (req.method === 'GET' && (sub === '' || sub === 'index.html')) {
+          const html = fs.readFileSync(path.join(PKG_DIR, 'src', 'ui.html'), 'utf8')
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+          res.end(html)
+          return
+        }
+        if (req.method === 'GET' && sub === 'api/state') { sendJson(res, 200, stateSnapshot()); return }
+        if (req.method === 'POST' && sub === 'api/keys') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const key = typeof body.key === 'string' ? body.key.trim() : ''
+          if (key === '') { sendJson(res, 400, { ok: false, error: 'key 不能为空' }); return }
+          const keys = agKeys()
+          if (!keys.includes(key)) keys.push(key)
+          state.keys = keys
+          writeState(home, state)
+          engine.pools = [agPool(), ...genericPools()]
+          const pool = agPool()
+          const current = engine.currentKey(pool)
+          if (current !== null) await writeCredential(pool, current)
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
+        if (req.method === 'POST' && sub === 'api/keys/remove') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const keys = agKeys()
+          const index = keys.indexOf(typeof body.key === 'string' ? body.key : '')
+          if (index >= 0) keys.splice(index, 1)
+          state.keys = keys
+          writeState(home, state)
+          engine.pools = [agPool(), ...genericPools()]
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
+        if (req.method === 'POST' && sub === 'api/url') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const value = typeof body.url === 'string' ? body.url.trim() : ''
+          if (value === '') { sendJson(res, 400, { ok: false, error: '端点不能为空' }); return }
+          state.url = value
+          writeState(home, state)
+          const hmr = ctx.get('hmr')
+          if (hmr?.reconcileProfile !== undefined) {
+            try { await hmr.reconcileProfile([]) } catch { /* 下面会提示重启 */ }
+          }
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
+        if (req.method === 'POST' && sub === 'api/reset') {
+          engine.reset(agPool())
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
+        sendJson(res, 404, { ok: false, error: 'not found' })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
+      }
+    }
+    scoped.effect(
+      () => server.register({ kind: 'prefix', path: '/dsh-ag-channel', handler }),
+      'dsh-ag-channel: 管理界面',
+    )
   })
 
   ctx.on('dispose', () => {

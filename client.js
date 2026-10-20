@@ -1,0 +1,175 @@
+/**
+ * dsh-ag-channel 的浏览器半身 —— 在 DSH「设置」里注册一个可视化面板。
+ *
+ * 这是手写的 ModuleLoader bundle：外壳会执行它，它必须恰好调用一次
+ * `window.__ModuleLoader__.load({ id, factory })`，factory(require) 返回一个
+ * Cordis 客户端插件（{ name, inject, apply }）。外壳只提供 require('react')。
+ * 没有构建步骤，也不能在模块顶层做 require/exports —— 全部写在 factory 里。
+ *
+ * 面板做的事：切地址、看 key 池、加/删 key、清除冷却。
+ * 所有写操作都走宿主提供的 /dsh-ag-channel/api/*（同源，无需鉴权）。
+ *
+ * @module client.js
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-ag-channel',
+  factory: (require) => {
+    const module = { exports: {} }
+    const exports = module.exports
+    const React = require('react')
+    const h = React.createElement
+    const { useState, useEffect, useCallback } = React
+
+    const inject = ['slots']
+    const API_BASE = '/dsh-ag-channel/api'
+
+    const S = {
+      page: { padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 18 },
+      h2: { fontSize: 14, fontWeight: 600, margin: 0 },
+      sub: { fontSize: 12, opacity: 0.65, margin: '4px 0 0', lineHeight: 1.6 },
+      card: { border: '1px solid var(--dsh-border, rgba(128,128,128,.25))', borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 },
+      row: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
+      grow: { flex: 1, minWidth: 160 },
+      input: { padding: '8px 10px', borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,.35))', background: 'var(--dsh-input-bg, rgba(128,128,128,.08))', color: 'inherit', font: 'inherit', outline: 'none' },
+      btn: { padding: '7px 13px', borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,.35))', background: 'var(--dsh-input-bg, rgba(128,128,128,.08))', color: 'inherit', font: 'inherit', cursor: 'pointer' },
+      btnPrimary: { padding: '7px 13px', borderRadius: 8, border: 'none', background: 'var(--dsh-accent, #4f7cff)', color: '#fff', font: 'inherit', fontWeight: 600, cursor: 'pointer' },
+      btnGhost: { padding: '5px 10px', borderRadius: 7, border: '1px solid var(--dsh-border, rgba(128,128,128,.4))', background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 12, cursor: 'pointer' },
+      pill: { fontSize: 11, padding: '2px 8px', borderRadius: 999, fontWeight: 600 },
+      mono: { font: '12px ui-monospace, Menlo, Consolas, monospace' },
+      kv: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 },
+      empty: { fontSize: 12, opacity: 0.6, padding: '10px 0', textAlign: 'center' },
+      hint: { fontSize: 11, opacity: 0.55, margin: 0 },
+    }
+
+    const pill = (text, color) => h('span', { style: { ...S.pill, background: `${color}22`, color } }, text)
+
+    async function api(path, body) {
+      const opts = body === undefined
+        ? { headers: { accept: 'application/json' } }
+        : { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) }
+      const res = await fetch(`${API_BASE}/${path}`, opts)
+      const data = await res.json().catch(() => ({ ok: false, error: '响应不是 JSON' }))
+      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`)
+      return data
+    }
+
+    function AgChannelSettings() {
+      const [state, setState] = useState(null)
+      const [error, setError] = useState(null)
+      const [newKey, setNewKey] = useState('')
+      const [busy, setBusy] = useState(false)
+
+      const load = useCallback(async () => {
+        try {
+          setState(await api('state'))
+          setError(null)
+        } catch (e) {
+          setError(e.message)
+        }
+      }, [])
+
+      useEffect(() => { load() }, [load])
+
+      const run = useCallback(async (fn) => {
+        setBusy(true)
+        try { await fn(); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
+      }, [load])
+
+      const addKey = () => {
+        const key = newKey.trim()
+        if (!key) return
+        setNewKey('')
+        run(() => api('keys', { key }))
+      }
+
+      if (error && !state) {
+        return h('div', { style: S.page },
+          h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, `读取失败：${error}`),
+        )
+      }
+      if (!state) return h('div', { style: S.page }, h('p', { style: S.sub }, '加载中…'))
+
+      const keys = state.keys ?? []
+      return h('div', { style: S.page },
+        h('div', { style: S.card },
+          h('h2', { style: S.h2 }, '渠道'),
+          h('div', { style: S.row },
+            h('button', {
+              style: { ...S.btn, ...(state.preset === 'ps' ? { borderColor: 'var(--dsh-accent,#4f7cff)' } : {}) },
+              disabled: busy,
+              onClick: () => run(() => api('url', { url: 'ps' })),
+            }, 'ps.air-outer.com'),
+            h('button', {
+              style: { ...S.btn, ...(state.preset === 'agentrouter' ? { borderColor: 'var(--dsh-accent,#4f7cff)' } : {}) },
+              disabled: busy,
+              onClick: () => run(() => api('url', { url: 'agentrouter' })),
+            }, 'agentrouter.org'),
+          ),
+          h('div', { style: S.kv },
+            h('span', { style: { opacity: 0.65 } }, '实际请求'),
+            h('span', { style: S.mono }, state.requestUrl),
+            h('span', { style: { opacity: 0.65 } }, '请求头'),
+            h('span', { style: S.mono }, JSON.stringify(state.headers)),
+            h('span', { style: { opacity: 0.65 } }, '模型'),
+            h('span', { style: S.mono }, state.models.map((m) => m.id).join(', ')),
+          ),
+          h('p', { style: S.hint }, '两个地址任意一个都能用；主地址连不上时插件会自动换另一个。'),
+        ),
+
+        h('div', { style: S.card },
+          h('h2', { style: S.h2 }, 'key 池 ', pill(`${keys.length} 个`, '#4f7cff')),
+          h('div', { style: S.row },
+            h('input', {
+              style: { ...S.input, ...S.grow },
+              placeholder: '粘贴 API Key，回车添加',
+              value: newKey,
+              onChange: (e) => setNewKey(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter') addKey() },
+            }),
+            h('button', { style: S.btnPrimary, disabled: busy, onClick: addKey }, '添加'),
+            h('button', { style: S.btnGhost, disabled: busy, onClick: () => run(() => api('reset', {})) }, '全部解封'),
+          ),
+          keys.length === 0
+            ? h('p', { style: S.empty }, '还没有 key —— 在上面粘贴一个开始。')
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              keys.map((key) => h('div', {
+                key: key.full,
+                style: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px', borderRadius: 7, background: 'rgba(128,128,128,.08)' },
+              },
+                h('span', { style: { ...S.mono, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, key.mask),
+                key.current ? pill('使用中', '#37b24d') : null,
+                key.banned ? pill('已拉黑', '#e03131') : null,
+                !key.banned && key.cooling > 0 ? pill(`冷却 ${Math.ceil(key.cooling / 1000)}s`, '#f08c00') : null,
+                !key.banned && key.cooling === 0 && key.failures > 0 ? pill(`失败 ${key.failures} 次`, '#f08c00') : null,
+                h('button', {
+                  style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
+                  disabled: busy,
+                  onClick: () => run(() => api('keys/remove', { key: key.full })),
+                }, '删除'),
+              )),
+            ),
+          h('p', { style: S.hint }, '上游返回 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。池里只有一个 key 时没有轮换可言。'),
+        ),
+
+        error ? h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, error) : null,
+      )
+    }
+
+    function apply(ctx) {
+      ctx.slots.inject('settings.section', () => ctx.slots.register(
+        {
+          name: 'settings.section',
+          id: 'ag-channel',
+          order: 43,
+          label: () => 'ag 渠道',
+        },
+        AgChannelSettings,
+      ))
+    }
+
+    exports.apply = apply
+    exports.inject = inject
+    exports.name = 'dsh-ag-channel-client'
+    return module.exports
+  },
+})

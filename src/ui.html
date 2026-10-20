@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ag 渠道 · key 池</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a21; --panel2: #1c212a; --line: rgba(255,255,255,.10);
+    --fg: #e8eaed; --dim: #9aa4b2; --accent: #4f7cff; --ok: #37b24d; --warn: #f08c00; --bad: #e03131;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --panel:#fff; --panel2:#f0f2f5; --line:rgba(0,0,0,.10); --fg:#1b1f27; --dim:#5b6472; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.6 -apple-system,"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size:19px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:13px; margin:0 0 22px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 12px; display:flex; align-items:center; gap:8px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .grow { flex:1; min-width:180px; }
+  input, select { padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel2); color:var(--fg); font:inherit; outline:none; }
+  input:focus { border-color:var(--accent); }
+  button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--panel2); color:var(--fg); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:transparent; color:#fff; font-weight:600; }
+  button.ghost { background:transparent; }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:13px; }
+  .kv dt { color:var(--dim); }
+  .kv dd { margin:0; font-family:12px/1.5 ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:600; font-size:12px; padding:6px 8px; border-bottom:1px solid var(--line); }
+  td { padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  .mono { font-family:12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:600; }
+  .pill.ok { background:rgba(55,178,77,.16); color:var(--ok); }
+  .pill.warn { background:rgba(240,140,0,.16); color:var(--warn); }
+  .pill.bad { background:rgba(224,49,49,.16); color:var(--bad); }
+  .pill.mute { background:rgba(128,128,128,.16); color:var(--dim); }
+  .empty { color:var(--dim); font-size:13px; padding:14px 0; text-align:center; }
+  .hint { color:var(--dim); font-size:12px; margin:8px 0 0; }
+  .toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); padding:9px 16px; border-radius:999px; background:var(--panel2); border:1px solid var(--line); font-size:13px; opacity:0; transition:.2s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  .toast.err { border-color:var(--bad); color:var(--bad); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ag 渠道 · key 池</h1>
+  <p class="sub">上游报 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。</p>
+
+  <div class="card">
+    <h2>渠道</h2>
+    <div class="row" style="margin-bottom:12px">
+      <select id="preset">
+        <option value="ps">ps · ps.air-outer.com</option>
+        <option value="agentrouter">agentrouter · agentrouter.org</option>
+        <option value="custom">自定义端点</option>
+      </select>
+      <input id="url" class="grow" placeholder="https://example.com/v1">
+      <button class="primary" id="saveUrl">保存地址</button>
+    </div>
+    <dl class="kv">
+      <dt>实际 baseURL</dt><dd id="baseURL">-</dd>
+      <dt>实际请求</dt><dd id="requestUrl">-</dd>
+      <dt>凭据引用</dt><dd id="credentialRef">-</dd>
+      <dt>请求头</dt><dd id="headers">-</dd>
+      <dt>模型</dt><dd id="models">-</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>key 池 <span id="keyCount" class="pill mute">0</span></h2>
+    <div class="row" style="margin-bottom:12px">
+      <input id="newKey" class="grow" placeholder="粘贴一个 API Key，回车或点添加">
+      <button class="primary" id="addKey">添加</button>
+      <button class="ghost" id="reset">全部解封</button>
+    </div>
+    <div id="keyTable"></div>
+    <p class="hint">池里只有一个 key 时没有轮换可言 —— 建议至少放两个。</p>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id)
+let state = null
+
+function toast(text, isError) {
+  const el = $('toast')
+  el.textContent = text
+  el.className = 'toast show' + (isError ? ' err' : '')
+  clearTimeout(toast._t)
+  toast._t = setTimeout(() => { el.className = 'toast' }, 2200)
+}
+
+async function api(path, body) {
+  const opts = body === undefined
+    ? { headers: { accept: 'application/json' } }
+    : { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) }
+  const res = await fetch('/dsh-ag-channel/api/' + path, opts)
+  const data = await res.json().catch(() => ({ ok: false, error: '响应不是 JSON' }))
+  if (!res.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + res.status))
+  return data
+}
+
+function statusOf(key) {
+  if (key.banned) return { text: '已拉黑', cls: 'bad' }
+  if (key.cooling > 0) return { text: '冷却 ' + Math.ceil(key.cooling / 1000) + 's', cls: 'warn' }
+  if (key.failures > 0) return { text: '失败 ' + key.failures + ' 次', cls: 'warn' }
+  return { text: '可用', cls: 'ok' }
+}
+
+function render() {
+  if (!state) return
+  $('baseURL').textContent = state.baseURL
+  $('requestUrl').textContent = state.requestUrl
+  $('credentialRef').textContent = state.credentialRef
+  $('headers').textContent = JSON.stringify(state.headers)
+  $('models').textContent = state.models.map((m) => m.id).join(', ')
+  $('url').value = state.url
+  $('preset').value = state.preset === 'custom' ? 'custom' : state.preset
+  $('keyCount').textContent = state.keys.length + ' 个'
+
+  const table = $('keyTable')
+  if (state.keys.length === 0) {
+    table.innerHTML = '<div class="empty">还没有 key —— 在上面粘贴一个开始。</div>'
+    return
+  }
+  let html = '<table><thead><tr><th>Key</th><th>状态</th><th>当前</th><th></th></tr></thead><tbody>'
+  for (const key of state.keys) {
+    const st = statusOf(key)
+    html += '<tr>'
+    html += '<td class="mono">' + escapeHtml(key.mask) + (key.lastError ? '<div class="hint" style="margin:2px 0 0">' + escapeHtml(key.lastError.slice(0, 120)) + '</div>' : '') + '</td>'
+    html += '<td><span class="pill ' + st.cls + '">' + st.text + '</span></td>'
+    html += '<td>' + (key.current ? '<span class="pill ok">使用中</span>' : '') + '</td>'
+    html += '<td style="text-align:right"><button class="ghost danger" data-del="' + escapeHtml(key.full) + '">删除</button></td>'
+    html += '</tr>'
+  }
+  html += '</tbody></table>'
+  table.innerHTML = html
+  for (const btn of table.querySelectorAll('button[data-del]')) {
+    btn.addEventListener('click', async () => {
+      try { await api('keys/remove', { key: btn.dataset.del }); await load(); toast('已删除') }
+      catch (e) { toast(e.message, true) }
+    })
+  }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+async function load() {
+  try {
+    state = await api('state')
+    render()
+  } catch (e) { toast(e.message, true) }
+}
+
+$('addKey').addEventListener('click', async () => {
+  const key = $('newKey').value.trim()
+  if (!key) return
+  try { await api('keys', { key }); $('newKey').value = ''; await load(); toast('已添加') }
+  catch (e) { toast(e.message, true) }
+})
+$('newKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('addKey').click() })
+
+$('saveUrl').addEventListener('click', async () => {
+  const preset = $('preset').value
+  const url = preset === 'custom' ? $('url').value.trim() : preset
+  if (!url) return toast('请填写端点', true)
+  try { await api('url', { url }); await load(); toast('地址已保存') }
+  catch (e) { toast(e.message, true) }
+})
+
+$('reset').addEventListener('click', async () => {
+  try { await api('reset', {}); await load(); toast('冷却已清除') }
+  catch (e) { toast(e.message, true) }
+})
+
+load()
+</script>
+</body>
+</html>
