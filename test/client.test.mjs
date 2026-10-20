@@ -61,7 +61,7 @@ test('apply 会往 settings.section 槽里注册一个面板', () => {
   assert.equal(typeof section.component, 'function')
 })
 
-test('模型页插槽：只给托管 host 上的路由渲染 key 池（按 URL 判定，不看名字）', () => {
+test('只注册设置分区（不再往模型页注入插槽）', () => {
   let loaded = null
   const fakeWindow = { __ModuleLoader__: { load: (arg) => { loaded = arg } } }
   new Function('window', source)(fakeWindow)
@@ -76,18 +76,12 @@ test('模型页插槽：只给托管 host 上的路由渲染 key 池（按 URL �
   }
   plugin.apply(ctx)
 
-  const card = registered.find((item) => item.meta.name === 'settings.models.provider-card')
-  assert.ok(card, '应当注册 settings.models.provider-card 插槽')
-
-  // 宿主按 URL 判定出来的托管路由名单：这里叫 ar
-  reactState.override = { managedIds: ['ar'], keys: [] }
-
-  // 名单外的 provider → 不渲染
-  assert.equal(card.component({ provider: { provider: 'minimax-cn', settingsPath: ['providers', 'minimax-cn'] } }), null)
-  assert.equal(card.component({ provider: { provider: 'ag', settingsPath: ['providers', 'ag'] } }), null)
-  assert.equal(card.component({}), null)
-  // 名单内的 → 渲染出东西（名字叫什么都行）
-  const rendered = card.component({ provider: { provider: 'ar', settingsPath: ['providers', 'ar'] } })
-  assert.notEqual(rendered, null)
-  reactState.override = null
+  const section = registered.find((item) => item.meta.name === 'settings.section')
+  assert.ok(section, '应当注册 settings.section 插槽')
+  assert.equal(section.meta.id, 'ag-channel')
+  assert.equal(typeof section.meta.label, 'function')
+  assert.equal(section.meta.label(), 'ag 渠道')
+  assert.equal(typeof section.component, 'function')
+  assert.equal(registered.length, 1, '只注册这一个插槽')
+  assert.equal(registered.find((item) => item.meta.name === 'settings.models.provider-card'), undefined, '不再往模型页注入')
 })

@@ -310,6 +310,8 @@ window.__ModuleLoader__.load({
             h('span', { style: S.mono }, state.requestUrl),
             h('span', { style: { opacity: 0.65 } }, '请求头'),
             h('span', { style: S.mono }, JSON.stringify(state.headers)),
+            h('span', { style: { opacity: 0.65 } }, '渠道名'),
+            h('span', { style: S.mono }, state.managedIds?.length > 0 ? state.managedIds.join(', ') : '（未接管）'),
           ),
           h('p', { style: S.hint }, '两个地址任意一个都能用；主地址连不上时插件会自动换另一个。'),
         ),
@@ -331,51 +333,9 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ */
-    /* 模型页里的托管渠道卡片：多 key 池                                    */
-    /* ------------------------------------------------------------------ */
-
-    /** 这张卡片对应的路由 id（Models 页给的是条目，id 在 provider / settingsPath 里）。 */
-    function routeIdOf(entry) {
-      if (entry === null || entry === undefined || typeof entry !== 'object') return undefined
-      if (typeof entry.provider === 'string' && entry.provider.length > 0) return entry.provider
-      if (Array.isArray(entry.settingsPath) && typeof entry.settingsPath[1] === 'string') return entry.settingsPath[1]
-      return undefined
-    }
-
-    function AgProviderCard(props) {
-      const [state] = useAgState()
-      const id = routeIdOf(props?.provider)
-      // 托管哪些路由由宿主按 URL 判定（不写死名字），这里只对照名单
-      if (!state || !id) return null
-      const managed = state.managedIds ?? []
-      if (!managed.includes(id)) return null
-      return h('div', {
-        style: {
-          marginTop: 12, padding: 12, borderRadius: 10,
-          border: '1px solid var(--dsh-border, rgba(128,128,128,.25))',
-          display: 'flex', flexDirection: 'column', gap: 8,
-        },
-      },
-        h('p', { style: { ...S.hint, margin: 0 } },
-          `渠道 ${id} 的 key 池：在这里加多个 key，某个 key 没额度时会自动切下一个并重发当前请求。`),
-        h(KeyPoolWidget, { compact: true }),
-      )
-    }
-
-    /* ------------------------------------------------------------------ */
 
     function apply(ctx) {
-      // 模型页里 ag 这个 provider 的卡片（多 key 池）
-      ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register(
-        {
-          name: 'settings.models.provider-card',
-          id: 'ag-channel-key-pool',
-          order: 50,
-        },
-        AgProviderCard,
-      ))
-
-      // 独立分区：设置 → ag 渠道
+      // 独立分区：设置 → ag 渠道（地址、key 池、模型编辑都在这里）
       ctx.slots.inject('settings.section', () => ctx.slots.register(
         {
           name: 'settings.section',
