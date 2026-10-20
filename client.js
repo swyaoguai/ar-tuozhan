@@ -1,12 +1,15 @@
 /**
- * dsh-ag-channel 的浏览器半身 —— 在 DSH「设置」里注册一个可视化面板。
+ * dsh-ag-channel 的浏览器半身。
+ *
+ * 两个入口：
+ *   1. 设置 → 模型 → ag 这个 provider 的卡片里：多 key 池（settings.models.provider-card 插槽）
+ *   2. 设置 → ag 渠道（独立分区）：渠道、key 池、模型编辑
  *
  * 这是手写的 ModuleLoader bundle：外壳会执行它，它必须恰好调用一次
  * `window.__ModuleLoader__.load({ id, factory })`，factory(require) 返回一个
  * Cordis 客户端插件（{ name, inject, apply }）。外壳只提供 require('react')。
  * 没有构建步骤，也不能在模块顶层做 require/exports —— 全部写在 factory 里。
  *
- * 面板做的事：切地址、看 key 池、加/删 key、清除冷却。
  * 所有写操作都走宿主提供的 /dsh-ag-channel/api/*（同源，无需鉴权）。
  *
  * @module client.js
@@ -36,7 +39,6 @@ window.__ModuleLoader__.load({
       btnGhost: { padding: '5px 10px', borderRadius: 7, border: '1px solid var(--dsh-border, rgba(128,128,128,.4))', background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 12, cursor: 'pointer' },
       pill: { fontSize: 11, padding: '2px 8px', borderRadius: 999, fontWeight: 600 },
       mono: { font: '12px ui-monospace, Menlo, Consolas, monospace' },
-      kv: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 },
       empty: { fontSize: 12, opacity: 0.6, padding: '10px 0', textAlign: 'center' },
       hint: { fontSize: 11, opacity: 0.55, margin: 0 },
     }
@@ -52,6 +54,89 @@ window.__ModuleLoader__.load({
       if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`)
       return data
     }
+
+    /* ------------------------------------------------------------------ */
+    /* key 池（模型页与设置分区共用）                                        */
+    /* ------------------------------------------------------------------ */
+
+    function KeyPoolWidget({ compact = false }) {
+      const [state, setState] = useState(null)
+      const [error, setError] = useState(null)
+      const [newKey, setNewKey] = useState('')
+      const [busy, setBusy] = useState(false)
+
+      const load = useCallback(async () => {
+        try {
+          setState(await api('state'))
+          setError(null)
+        } catch (e) {
+          setError(e.message)
+        }
+      }, [])
+
+      useEffect(() => { load() }, [load])
+
+      const run = useCallback(async (fn) => {
+        setBusy(true)
+        try { await fn(); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
+      }, [load])
+
+      const addKey = () => {
+        const key = newKey.trim()
+        if (!key) return
+        setNewKey('')
+        run(() => api('keys', { key }))
+      }
+
+      if (error && !state) {
+        return h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, `key 池读取失败：${error}`)
+      }
+      if (!state) return h('p', { style: S.sub }, '加载中…')
+
+      const keys = state.keys ?? []
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { style: { ...S.row, alignItems: 'center' } },
+          h('span', { style: S.h2 }, 'key 池'),
+          pill(`${keys.length} 个`, '#4f7cff'),
+        ),
+        h('div', { style: S.row },
+          h('input', {
+            style: { ...S.input, ...S.grow },
+            placeholder: '粘贴 API Key，回车添加（可放多个账号轮换）',
+            value: newKey,
+            onChange: (e) => setNewKey(e.target.value),
+            onKeyDown: (e) => { if (e.key === 'Enter') addKey() },
+          }),
+          h('button', { style: S.btnPrimary, disabled: busy, onClick: addKey }, '添加'),
+          h('button', { style: S.btnGhost, disabled: busy, onClick: () => run(() => api('reset', {})) }, '全部解封'),
+        ),
+        keys.length === 0
+          ? h('p', { style: S.empty }, '还没有 key —— 在上面粘贴一个开始。')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            keys.map((key) => h('div', {
+              key: key.full,
+              style: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px', borderRadius: 7, background: 'rgba(128,128,128,.08)' },
+            },
+              h('span', { style: { ...S.mono, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, key.mask),
+              key.current ? pill('使用中', '#37b24d') : null,
+              key.banned ? pill('已拉黑', '#e03131') : null,
+              !key.banned && key.cooling > 0 ? pill(`冷却 ${Math.ceil(key.cooling / 1000)}s`, '#f08c00') : null,
+              !key.banned && key.cooling === 0 && key.failures > 0 ? pill(`失败 ${key.failures} 次`, '#f08c00') : null,
+              h('button', {
+                style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
+                disabled: busy,
+                onClick: () => run(() => api('keys/remove', { key: key.full })),
+              }, '删除'),
+            )),
+          ),
+        compact ? null : h('p', { style: S.hint }, '上游返回 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。池里只有一个 key 时没有轮换可言。'),
+        error ? h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, error) : null,
+      )
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 模型编辑                                                            */
+    /* ------------------------------------------------------------------ */
 
     const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -181,10 +266,13 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ------------------------------------------------------------------ */
+    /* 设置分区：ag 渠道                                                    */
+    /* ------------------------------------------------------------------ */
+
     function AgChannelSettings() {
       const [state, setState] = useState(null)
       const [error, setError] = useState(null)
-      const [newKey, setNewKey] = useState('')
       const [busy, setBusy] = useState(false)
 
       const load = useCallback(async () => {
@@ -203,13 +291,6 @@ window.__ModuleLoader__.load({
         try { await fn(); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
       }, [load])
 
-      const addKey = () => {
-        const key = newKey.trim()
-        if (!key) return
-        setNewKey('')
-        run(() => api('keys', { key }))
-      }
-
       if (error && !state) {
         return h('div', { style: S.page },
           h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, `读取失败：${error}`),
@@ -217,7 +298,6 @@ window.__ModuleLoader__.load({
       }
       if (!state) return h('div', { style: S.page }, h('p', { style: S.sub }, '加载中…'))
 
-      const keys = state.keys ?? []
       return h('div', { style: S.page },
         h('div', { style: S.card },
           h('h2', { style: S.h2 }, '渠道'),
@@ -233,51 +313,16 @@ window.__ModuleLoader__.load({
               onClick: () => run(() => api('url', { url: 'agentrouter' })),
             }, 'agentrouter.org'),
           ),
-          h('div', { style: S.kv },
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 } },
             h('span', { style: { opacity: 0.65 } }, '实际请求'),
             h('span', { style: S.mono }, state.requestUrl),
             h('span', { style: { opacity: 0.65 } }, '请求头'),
             h('span', { style: S.mono }, JSON.stringify(state.headers)),
-            h('span', { style: { opacity: 0.65 } }, '模型'),
-            h('span', { style: S.mono }, state.models.map((m) => m.id).join(', ')),
           ),
           h('p', { style: S.hint }, '两个地址任意一个都能用；主地址连不上时插件会自动换另一个。'),
         ),
 
-        h('div', { style: S.card },
-          h('h2', { style: S.h2 }, 'key 池 ', pill(`${keys.length} 个`, '#4f7cff')),
-          h('div', { style: S.row },
-            h('input', {
-              style: { ...S.input, ...S.grow },
-              placeholder: '粘贴 API Key，回车添加',
-              value: newKey,
-              onChange: (e) => setNewKey(e.target.value),
-              onKeyDown: (e) => { if (e.key === 'Enter') addKey() },
-            }),
-            h('button', { style: S.btnPrimary, disabled: busy, onClick: addKey }, '添加'),
-            h('button', { style: S.btnGhost, disabled: busy, onClick: () => run(() => api('reset', {})) }, '全部解封'),
-          ),
-          keys.length === 0
-            ? h('p', { style: S.empty }, '还没有 key —— 在上面粘贴一个开始。')
-            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-              keys.map((key) => h('div', {
-                key: key.full,
-                style: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px', borderRadius: 7, background: 'rgba(128,128,128,.08)' },
-              },
-                h('span', { style: { ...S.mono, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, key.mask),
-                key.current ? pill('使用中', '#37b24d') : null,
-                key.banned ? pill('已拉黑', '#e03131') : null,
-                !key.banned && key.cooling > 0 ? pill(`冷却 ${Math.ceil(key.cooling / 1000)}s`, '#f08c00') : null,
-                !key.banned && key.cooling === 0 && key.failures > 0 ? pill(`失败 ${key.failures} 次`, '#f08c00') : null,
-                h('button', {
-                  style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
-                  disabled: busy,
-                  onClick: () => run(() => api('keys/remove', { key: key.full })),
-                }, '删除'),
-              )),
-            ),
-          h('p', { style: S.hint }, '上游返回 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。池里只有一个 key 时没有轮换可言。'),
-        ),
+        h('div', { style: S.card }, h(KeyPoolWidget, {})),
 
         h('div', { style: S.card },
           h('h2', { style: S.h2 }, '模型'),
@@ -293,7 +338,47 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ------------------------------------------------------------------ */
+    /* 模型页里的 ag 卡片：多 key 池                                        */
+    /* ------------------------------------------------------------------ */
+
+    /** 这一行是不是 ag 渠道？ */
+    function isAgProvider(entry) {
+      if (entry === null || entry === undefined || typeof entry !== 'object') return false
+      if (Array.isArray(entry.settingsPath) && entry.settingsPath.join('.') === 'providers.ag') return true
+      return entry.provider === 'ag'
+    }
+
+    function AgProviderCard(props) {
+      const entry = props?.provider
+      if (!isAgProvider(entry)) return null
+      return h('div', {
+        style: {
+          marginTop: 12, padding: 12, borderRadius: 10,
+          border: '1px solid var(--dsh-border, rgba(128,128,128,.25))',
+          display: 'flex', flexDirection: 'column', gap: 8,
+        },
+      },
+        h('p', { style: { ...S.hint, margin: 0 } },
+          'ag 渠道的 key 池：在这里加多个 key，某个 key 没额度时会自动切下一个并重发当前请求。'),
+        h(KeyPoolWidget, { compact: true }),
+      )
+    }
+
+    /* ------------------------------------------------------------------ */
+
     function apply(ctx) {
+      // 模型页里 ag 这个 provider 的卡片（多 key 池）
+      ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register(
+        {
+          name: 'settings.models.provider-card',
+          id: 'ag-channel-key-pool',
+          order: 50,
+        },
+        AgProviderCard,
+      ))
+
+      // 独立分区：设置 → ag 渠道
       ctx.slots.inject('settings.section', () => ctx.slots.register(
         {
           name: 'settings.section',
