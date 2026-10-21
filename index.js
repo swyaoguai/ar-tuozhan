@@ -25,7 +25,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  DEFAULT_MODELS, DEFAULT_PRESET, URL_PRESETS, dshHome, hostOfBaseURL, normalizeBaseURL,
+  DEFAULT_MODELS, DEFAULT_PRESET, DEFAULT_STATIONS, URL_PRESETS, dshHome, hostOfBaseURL, normalizeBaseURL,
   presetHosts, readState, requestUrlOf, resolveBaseURL, statePath, writeState,
 } from './src/channel.js'
 import { KeyPoolEngine, maskKey } from './src/pool.js'
@@ -52,6 +52,7 @@ try {
     apiKeyEnv: Schema.string().default('AR_API_KEY').description('取 key 的凭据引用'),
     originator: Schema.string().default('codex_cli_rs').description('附带的 originator 请求头'),
     displayName: Schema.string().default('ar').description('显示名'),
+    api: Schema.string().default('anthropic-messages').description('协议：anthropic-messages（去 /v1）/ openai-responses（保留 /v1）/ openai-completions'),
     models: Schema.array(Schema.object({
       id: Schema.string(),
       name: Schema.string(),
@@ -81,26 +82,41 @@ export function apply(ctx, config = {}) {
     delete poolState.pools.ag
   }
 
-  const chosen = () => {
-    const fromState = typeof state.url === 'string' && state.url.length > 0 ? state.url : undefined
-    const fromConfig = typeof config.url === 'string' && config.url.length > 0 ? config.url : undefined
-    return fromState ?? fromConfig ?? URL_PRESETS[DEFAULT_PRESET]
+  /** 套站点列表（两个，各对应一个 provider 路由）。 */
+  const stations = () => (Array.isArray(state.stations) && state.stations.length > 0 ? state.stations : DEFAULT_STATIONS)
+  const stationById = (id) => stations().find((station) => station.id === id)
+  /** 当前选中的站点（面板里编辑哪一个）。 */
+  const currentStation = () => {
+    const id = typeof state.current === 'string' ? state.current : undefined
+    const found = id === undefined ? undefined : stationById(id)
+    return found ?? stations()[0]
   }
-  const baseURL = () => resolveBaseURL(chosen())
   /**
-   * 插件托管的 host：两个预设 + 用户自填的那个。
-   * **以 URL 判定，不以路由 id 判定** —— 渠道叫什么名字（ag / ar / 随便）
-   * 都不影响插件接管它。
+   * 插件托管的 host：所有站点的 host。
+   * **以 URL 判定，不以路由 id 判定** —— 路由叫什么名字都不影响插件接管它。
    */
   const managedHosts = () => {
     const hosts = new Set(presetHosts())
-    const custom = hostOfBaseURL(normalizeBaseURL(chosen()))
-    if (custom !== '') hosts.add(custom)
+    for (const station of stations()) {
+      const host = hostOfBaseURL(normalizeBaseURL(station.url, station.api))
+      if (host !== '') hosts.add(host)
+    }
     return hosts
   }
   const isManagedUrl = (value) => {
     const host = hostOfBaseURL(String(value ?? ''))
     return host !== '' && managedHosts().has(host)
+  }
+  /** 站点 → profile patch 里对应的路由 id（按 URL 认；没有就用站点自己的 id）。 */
+  const routeIdOfStation = (station) => {
+    if (station === undefined || station === null) return managedRouteId()
+    const providers = patchProviders()
+    const stationHost = hostOfBaseURL(normalizeBaseURL(station.url, station.api))
+    const found = Object.keys(providers).find((id) => {
+      const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
+      return host !== '' && host === stationHost
+    })
+    return found ?? station.id
   }
   const presetOf = (value) => {
     for (const [name, url] of Object.entries(URL_PRESETS)) {
@@ -108,12 +124,14 @@ export function apply(ctx, config = {}) {
     }
     return 'custom'
   }
-  const models = () => {
-    const list = Array.isArray(state.models) && state.models.length > 0
-      ? state.models
-      : Array.isArray(config.models) && config.models.length > 0
-        ? config.models
-        : DEFAULT_MODELS
+  const models = (station = currentStation()) => {
+    const list = Array.isArray(station?.models) && station.models.length > 0
+      ? station.models
+      : Array.isArray(state.models) && state.models.length > 0
+        ? state.models
+        : Array.isArray(config.models) && config.models.length > 0
+          ? config.models
+          : DEFAULT_MODELS
     return list
       .filter((model) => model !== null && typeof model === 'object' && typeof model.id === 'string')
       .map((model) => ({
@@ -145,7 +163,8 @@ export function apply(ctx, config = {}) {
     configEditor = scoped.configEditor ?? null
   })
   const managedRouteId = () => managedId ?? (typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : 'ar')
-  const writeAgProfile = async (fields) => {
+  /** 往某个路由写字段（stationId 为空时用当前站点）。 */
+  const writeAgProfile = async (fields, stationId = undefined) => {
     if (configEditor === null) {
       throw new Error('这个 profile 没有配置编辑器（configEditor），无法写入 provider 配置')
     }
@@ -153,7 +172,7 @@ export function apply(ctx, config = {}) {
     if (entry === undefined) {
       throw new Error('找不到 llm-pi-ai 条目')
     }
-    const id = managedRouteId()
+    const id = stationId ?? managedRouteId()
     await configEditor.edit(entry, (current) => ({
       ...current,
       providers: {
@@ -193,11 +212,14 @@ export function apply(ctx, config = {}) {
   /** 通用 key 池（其它渠道用），从 ~/.dsh/key-pool.json 读。 */
   const genericPools = () => readPools(home, poolConfigPath(home))
 
-  /** 这个渠道自己的池：host 覆盖两个预设地址，key 来自状态文件。 */
+  /**
+   * 套站共用的 key 池：host 覆盖所有站点（两个地址都命中），
+   * key 来自状态文件。谁先失败就换下一个，失败的那个进冷却。
+   */
   const arPool = () => ({
     id: 'ar',
     keys: arKeys(),
-    hosts: presetHosts(),
+    hosts: [...managedHosts()],
     credentialRef: typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0 ? config.apiKeyEnv : 'AR_API_KEY',
     strategy: 'failover',
     authHeader: 'auto',
@@ -233,23 +255,23 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  const buildProfile = () => ({
+  const buildProfile = (station = currentStation()) => ({
     apiKeyEnv: typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0 ? config.apiKeyEnv : 'AR_API_KEY',
-    api: 'anthropic-messages',
-    baseURL: baseURL(),
-    models: models(),
+    api: station?.api ?? 'anthropic-messages',
+    baseURL: normalizeBaseURL(station?.url ?? URL_PRESETS[DEFAULT_PRESET], station?.api ?? 'anthropic-messages'),
+    models: models(station),
     headers: {
       ...(typeof config.originator === 'string' && config.originator.length > 0 ? { originator: config.originator } : { originator: 'codex_cli_rs' }),
     },
-    ...(typeof config.displayName === 'string' && config.displayName.length > 0 ? { displayName: config.displayName } : { displayName: 'ar' }),
+    ...(typeof config.displayName === 'string' && config.displayName.length > 0 ? { displayName: config.displayName } : {}),
   })
 
   if (config.enabled !== false) {
     // 不用运行时拦截：profile 的 patch 就是 llm-pi-ai 配置的真源，
-    // 插件直接把托管路由补齐写进 patch（见 ensureManagedRoute），
+    // 插件把托管路由补齐写进 patch（见 ensureManagedRoutes），
     // 运行时就自然带着插件的请求头与模型。
     ctx.logger?.info?.(
-      `ar-tuozhan: 渠道已接管（托管 host=${[...managedHosts()].join(', ')}，模型=${models().map((m) => m.id).join(',')}，key 数=${arKeys().length}）`,
+      `ar-tuozhan: 套站已接管（${stations().map((s) => `${s.label}(${s.api})`).join('、')}，key 数=${arKeys().length}）`,
     )
   }
 
@@ -279,35 +301,42 @@ export function apply(ctx, config = {}) {
   if (config.enabled !== false) startFailover()
 
   /**
-   * 把插件的缺项补进 profile 里那个托管路由：
-   *   - 路由不存在 → 用插件默认值建一个（名字可在设置里改）
+   * 把每个站点的路由补进 profile：
+   *   - 路由不存在 → 用站点配置建一个（id 优先用站点自己的）
    *   - 路由存在   → 只补用户没写的（协议、请求头），模型等一律不动
    *
    * 写进 patch 之后，运行时读到的就是它 —— Models 页看得见、也能编辑，
    * 插件的 originator 请求头也真的生效。
    */
-  const ensureManagedRoute = async () => {
+  const ensureManagedRoutes = async () => {
     if (configEditor === null) return
     const providers = patchProviders()
-    const found = Object.keys(providers).filter((id) => isManagedUrl(providers[id]?.baseURL))
     const defaults = buildProfile()
-    const preferred = typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : undefined
-    const id = found.includes(preferred) ? preferred
-      : found[0]
-      ?? preferred
-      ?? 'ar'
-    const existing = providers[id] ?? {}
-    const wanted = {
-      ...existing,
-      api: existing.api ?? defaults.api,
-      baseURL: existing.baseURL ?? defaults.baseURL,
-      models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : defaults.models,
-      headers: { ...defaults.headers, ...(existing.headers ?? {}) },
+    const wanted = {}
+    const ids = []
+    for (const station of stations()) {
+      const stationHost = hostOfBaseURL(normalizeBaseURL(station.url, station.api))
+      // 这个站点已经有的路由（按 URL 认，名字随意）
+      const existingId = Object.keys(providers).find((id) => {
+        const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
+        return host !== '' && host === stationHost
+      })
+      const id = existingId ?? station.id
+      const existing = providers[id] ?? {}
+      wanted[id] = {
+        ...existing,
+        api: existing.api ?? station.api,
+        baseURL: existing.baseURL ?? normalizeBaseURL(station.url, station.api),
+        models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : models(station),
+        headers: { ...defaults.headers, ...(existing.headers ?? {}) },
+        ...(existing.displayName === undefined ? { displayName: station.label ?? station.id } : {}),
+      }
+      ids.push(id)
     }
-    const same = JSON.stringify(existing) === JSON.stringify(wanted)
-    managedIds = found.length > 0 ? found : [id]
-    managedId = id
-    if (same) return
+    managedIds = ids
+    managedId = ids[0] ?? managedRouteId()
+    const changed = ids.some((id) => JSON.stringify(providers[id] ?? {}) !== JSON.stringify(wanted[id]))
+    if (!changed) return
     const entry = configEditor.entries().find((item) => item.options.id === 'llm-pi-ai')
     if (entry === undefined) return
     try {
@@ -315,15 +344,15 @@ export function apply(ctx, config = {}) {
         ...raw,
         providers: {
           ...(raw.providers ?? {}),
-          [id]: wanted,
+          ...Object.fromEntries(ids.map((id) => [id, wanted[id]])),
         },
       }))
-      ctx.logger?.info?.(`ar-tuozhan: 已在 profile 里就位托管路由「${id}」`)
+      ctx.logger?.info?.(`ar-tuozhan: 已在 profile 里就位托管路由 ${ids.join('、')}`)
     } catch (error) {
       ctx.logger?.warn?.(`ar-tuozhan: 写入托管路由失败: ${error?.message ?? error}`)
     }
   }
-  void ensureManagedRoute()
+  void ensureManagedRoutes()
 
   /** 启动时把池里的当前 key 写进凭据引用（provider 因此不需要改配置）。 */
   const seedCredential = async () => {
@@ -374,7 +403,7 @@ export function apply(ctx, config = {}) {
     const signature = found.join(',')
     if (signature !== lastEnsured) {
       lastEnsured = signature
-      void ensureManagedRoute()
+      void ensureManagedRoutes()
     }
   }, 15_000)
   if (typeof timer.unref === 'function') timer.unref()
@@ -382,35 +411,50 @@ export function apply(ctx, config = {}) {
   ctx.inject(['commands'], (scoped) => {
     scoped.commands.register({
       name: 'ar-tuozhan',
-      description: 'ag 渠道：看状态 / 换地址 / 加删 key',
-      input: { hint: 'status | url <ps|agentrouter|完整端点> | add <key> | remove <key> | reset' },
+      description: 'ar 套站：看状态 / 切站点 / 换地址 / 加删 key',
+      input: { hint: 'status | site <id> | url <ps|agentrouter|完整端点> | add <key> | remove <key> | use <key> | reset' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const [action = 'status', value] = raw.split(/\s+/)
+
+        if (action === 'site') {
+          const station = value === undefined ? currentStation() : stationById(value)
+          if (station === undefined) {
+            return { kind: 'error', text: `没有叫 "${value}" 的站点。可用：${stations().map((s) => s.id).join('、')}` }
+          }
+          state.current = station.id
+          writeState(home, state)
+          return { kind: 'success', text: `当前站点切到「${station.label}」（${station.id}，${station.api}）。` }
+        }
 
         if (action === 'url') {
           if (typeof value !== 'string' || value.length === 0) {
             return { kind: 'error', text: '用法：url <ps|agentrouter|完整端点>' }
           }
-          const next = resolveBaseURL(value)
+          const station = currentStation()
+          const next = resolveBaseURL(value, station.api)
           try {
             // 写进 profile patch —— 和「设置 → 模型」里改 baseURL 是同一份数据
-            await writeAgProfile({ baseURL: next })
+            await writeAgProfile({ baseURL: next }, routeIdOfStation(station))
           } catch (error) {
             return { kind: 'error', text: `改地址失败：${error?.message ?? error}` }
           }
-          state.url = value
+          station.url = value
+          state.stations = stations()
           writeState(home, state)
           return {
             kind: 'success',
-            text: `ag 渠道地址已切到 ${value}（baseURL=${next}，请求 ${requestUrlOf(next)}）。` +
+            text: `「${station.label}」地址已切到 ${value}（baseURL=${next}，请求 ${requestUrlOf(next, station.api)}）。` +
               '\n已写入 profile 配置，「设置 → 模型」里看到的就是它。',
           }
         }
 
         if (action === 'models') {
-          const list = effective?.models ?? models()
-          const lines = ['ag 渠道的模型（这里改 / 在「设置 → 模型」里改，写进的是同一份 profile 配置）：']
+          const station = currentStation()
+          const providers = patchProviders()
+          const route = providers[routeIdOfStation(station)] ?? {}
+          const list = route.models ?? models(station)
+          const lines = [`「${station.label}」的模型（这里改 / 在「设置 → 模型」里改，写进的是同一份 profile 配置）：`]
           for (const model of list) {
             lines.push(`  ${model.id}`)
             lines.push(`    名称: ${model.name ?? model.id}`)
@@ -418,7 +462,7 @@ export function apply(ctx, config = {}) {
             lines.push(`    输入类型: ${Array.isArray(model.input) && model.input.length > 0 ? model.input.join(', ') : '(默认)'}`)
             lines.push(`    思考强度: ${model.reasoningEfforts === false ? '不支持' : JSON.stringify(model.reasoningEfforts ?? '(默认)')}`)
           }
-          lines.push('', '想改就用「设置 → 模型」里编辑 ag，或用面板里的模型编辑器。')
+          lines.push('', '想改就用「设置 → 模型」里编辑该路由，或用面板里的模型编辑器。')
           return { kind: 'success', text: lines.join('\n') }
         }
 
@@ -471,19 +515,34 @@ export function apply(ctx, config = {}) {
 
         const pool = arPool()
         const snapshot = engine.snapshot().find((item) => item.id === 'ar')
+        const station = currentStation()
+        const providers = patchProviders()
         const lines = [
-          'ag 渠道：',
-          `  地址预设: ${presetOf(chosen())}`,
-          `  填写的端点: ${chosen()}`,
-          `  实际 baseURL: ${baseURL()}`,
-          `  实际请求地址: ${requestUrlOf(baseURL())}`,
-          `  凭据引用: ${buildProfile().apiKeyEnv}`,
-          `  请求头: ${JSON.stringify(buildProfile().headers)}`,
-          `  模型: ${models().map((m) => m.id).join(', ')}`,
-          `  状态文件: ${statePath(home)}`,
+          'ar 套站：',
           '',
-          `key 池（${arKeys().length} 个）：`,
+          '站点：',
         ]
+        for (const item of stations()) {
+          const routeId = routeIdOfStation(item)
+          const route = providers[routeId] ?? {}
+          const isCurrent = item.id === station.id
+          const baseURL = route.baseURL ?? normalizeBaseURL(item.url, item.api)
+          const api = route.api ?? item.api
+          lines.push(`  ${isCurrent ? '▶' : ' '} ${item.label}（${item.id}，${api}）`)
+          lines.push(`      路由: ${routeId}${route.displayName ? ` · 显示名 ${route.displayName}` : ''}`)
+          lines.push(`      baseURL: ${baseURL}`)
+          lines.push(`      实际请求: ${requestUrlOf(baseURL, api)}`)
+          lines.push(`      模型: ${(route.models ?? models(item)).map((m) => m.id).join(', ')}`)
+        }
+        lines.push(
+          '',
+          `当前站点: ${station.label}（/ar-tuozhan site <id> 切换）`,
+          `凭据引用: ${buildProfile(station).apiKeyEnv}`,
+          `请求头: ${JSON.stringify(buildProfile(station).headers)}`,
+          `状态文件: ${statePath(home)}`,
+          '',
+          `key 池（两个站点共用，${arKeys().length} 个）：`,
+        )
         for (const key of snapshot?.keys ?? []) {
           const flags = [
             key.banned ? '已拉黑' : '',
@@ -493,9 +552,9 @@ export function apply(ctx, config = {}) {
           lines.push(`  ${key.key}${flags ? '  [' + flags + ']' : ''}${key.lastError ? '  ' + key.lastError : ''}`)
         }
         if (arKeys().length === 0) {
-          lines.push('  （还没有 key —— 用 /ag-channel add <key> 加几个）')
+          lines.push('  （还没有 key —— 用 /ar-tuozhan add <key> 加几个）')
         }
-        lines.push('', '命令：/ag-channel add <key> | url <ps|agentrouter> | remove <key> | reset')
+        lines.push('', '命令：/ar-tuozhan site <id> | add <key> | use <key> | url <ps|agentrouter> | remove <key> | reset')
         return { kind: 'success', text: lines.join('\n') }
       },
     })
@@ -535,30 +594,48 @@ export function apply(ctx, config = {}) {
         cooling: key.cooling,
         lastError: key.lastError,
       }))
-      // 托管路由的生效配置直接读 profile patch（真源），不是内存里的副本
       const providers = patchProviders()
-      const found = Object.keys(providers).filter((id) => isManagedUrl(providers[id]?.baseURL))
-      const route = providers[found[0]] ?? {}
-      const defaults = buildProfile()
+      const stationRows = stations().map((station) => {
+        const routeId = routeIdOfStation(station)
+        const route = providers[routeId] ?? {}
+        const baseURL = route.baseURL ?? normalizeBaseURL(station.url, station.api)
+        const api = route.api ?? station.api
+        return {
+          id: station.id,
+          label: station.label,
+          api,
+          url: station.url,
+          baseURL,
+          requestUrl: requestUrlOf(baseURL, api),
+          routeId,
+          displayName: route.displayName ?? station.label,
+          credentialRef: route.apiKeyEnv ?? buildProfile(station).apiKeyEnv,
+          headers: route.headers ?? buildProfile(station).headers,
+          models: route.models ?? models(station),
+        }
+      })
+      const active = currentStation()
+      const row = stationRows.find((item) => item.id === active.id) ?? stationRows[0] ?? {}
+      const defaults = buildProfile(active)
       return {
         ok: true,
-        url: chosen(),
-        preset: presetOf(chosen()),
-        baseURL: route.baseURL ?? defaults.baseURL,
-        requestUrl: requestUrlOf(route.baseURL ?? defaults.baseURL),
-        credentialRef: route.apiKeyEnv ?? defaults.apiKeyEnv,
-        headers: route.headers ?? defaults.headers,
-        models: route.models ?? defaults.models,
+        url: row.url ?? active.url,
+        baseURL: row.baseURL ?? defaults.baseURL,
+        requestUrl: row.requestUrl ?? requestUrlOf(defaults.baseURL, defaults.api),
+        credentialRef: row.credentialRef ?? defaults.apiKeyEnv,
+        headers: row.headers ?? defaults.headers,
+        models: row.models ?? defaults.models,
+        api: row.api ?? defaults.api,
+        stations: stationRows,
+        currentStation: active.id,
         keys,
-        poolid: 'ar',
-        // 托管的路由：按 URL 判定出来的，不是写死 id
-        managedId: found[0] ?? managedRouteId(),
-        managedIds: found.length > 0 ? found : managedIds,
+        poolId: 'ar',
+        managedId: managedRouteId(),
+        managedIds: stationRows.map((item) => item.routeId),
         managedHosts: [...managedHosts()],
         canWriteProfile: configEditor !== null,
       }
     }
-
     const handler = async (req, res) => {
       try {
         const url = new URL(req.url, 'http://localhost')
@@ -606,18 +683,29 @@ export function apply(ctx, config = {}) {
           sendJson(res, 200, stateSnapshot())
           return
         }
+        if (req.method === 'POST' && sub === 'api/station') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const id = typeof body.id === 'string' ? body.id : ''
+          if (stationById(id) === undefined) { sendJson(res, 400, { ok: false, error: '没有这个站点' }); return }
+          state.current = id
+          writeState(home, state)
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
         if (req.method === 'POST' && sub === 'api/url') {
           const body = JSON.parse((await readBody(req)) || '{}')
           const value = typeof body.url === 'string' ? body.url.trim() : ''
           if (value === '') { sendJson(res, 400, { ok: false, error: '端点不能为空' }); return }
-          const next = resolveBaseURL(value)
+          const station = typeof body.station === 'string' ? (stationById(body.station) ?? currentStation()) : currentStation()
+          const next = resolveBaseURL(value, station.api)
           try {
-            await writeAgProfile({ baseURL: next })
+            await writeAgProfile({ baseURL: next }, routeIdOfStation(station))
           } catch (error) {
             sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
             return
           }
-          state.url = value
+          station.url = value
+          state.stations = stations()
           writeState(home, state)
           sendJson(res, 200, stateSnapshot())
           return
@@ -641,13 +729,15 @@ export function apply(ctx, config = {}) {
                   : {}),
             }))
           if (cleaned.length === 0) { sendJson(res, 400, { ok: false, error: '至少要有一个模型' }); return }
+          const station = typeof body.station === 'string' ? (stationById(body.station) ?? currentStation()) : currentStation()
           try {
-            await writeAgProfile({ models: cleaned })
+            await writeAgProfile({ models: cleaned }, routeIdOfStation(station))
           } catch (error) {
             sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
             return
           }
-          state.models = cleaned
+          station.models = cleaned
+          state.stations = stations()
           writeState(home, state)
           sendJson(res, 200, stateSnapshot())
           return

@@ -57,8 +57,9 @@
   <p class="sub">上游报 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。</p>
 
   <div class="card">
-    <h2>渠道</h2>
+    <h2>套站</h2>
     <div class="row" style="margin-bottom:12px">
+      <select id="station"></select>
       <select id="preset">
         <option value="ps">ps · ps.air-outer.com</option>
         <option value="agentrouter">agentrouter · agentrouter.org</option>
@@ -70,6 +71,8 @@
     <dl class="kv">
       <dt>实际 baseURL</dt><dd id="baseURL">-</dd>
       <dt>实际请求</dt><dd id="requestUrl">-</dd>
+      <dt>协议</dt><dd id="api">-</dd>
+      <dt>路由</dt><dd id="route">-</dd>
       <dt>凭据引用</dt><dd id="credentialRef">-</dd>
       <dt>请求头</dt><dd id="headers">-</dd>
       <dt>模型</dt><dd id="models">-</dd>
@@ -134,8 +137,14 @@ function render() {
   $('credentialRef').textContent = state.credentialRef
   $('headers').textContent = JSON.stringify(state.headers)
   $('models').textContent = state.models.map((m) => m.id).join(', ')
-  $('url').value = state.url
-  $('preset').value = state.preset === 'custom' ? 'custom' : state.preset
+  const stations = state.stations ?? []
+  const active = stations.find((item) => item.id === state.currentStation) ?? stations[0]
+  $('station').innerHTML = stations.map((item) => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label + '（' + item.api + '）') + '</option>').join('')
+  if (active) $('station').value = active.id
+  $('url').value = active ? active.url : state.url
+  $('preset').value = 'custom'
+  $('api').textContent = active ? active.api : ''
+  $('route').textContent = active ? active.routeId : ''
   $('keyCount').textContent = state.keys.length + ' 个'
   modelDraft = draftFrom(state.models)
   renderModels()
@@ -307,11 +316,16 @@ $('addKey').addEventListener('click', async () => {
 })
 $('newKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('addKey').click() })
 
+$('station').addEventListener('change', async () => {
+  try { await api('station', { id: $('station').value }); await load(); toast('已切换站点') }
+  catch (e) { toast(e.message, true) }
+})
+
 $('saveUrl').addEventListener('click', async () => {
   const preset = $('preset').value
   const url = preset === 'custom' ? $('url').value.trim() : preset
   if (!url) return toast('请填写端点', true)
-  try { await api('url', { url }); await load(); toast('地址已保存') }
+  try { await api('url', { url, station: $('station').value }); await load(); toast('地址已保存') }
   catch (e) { toast(e.message, true) }
 })
 
@@ -328,7 +342,7 @@ $('addModel').addEventListener('click', () => {
 $('saveModels').addEventListener('click', async () => {
   const models = modelsFromDraft().filter((model) => model.id.trim().length > 0)
   if (models.length === 0) return toast('至少要有一个模型（填 id）', true)
-  try { await api('models', { models }); await load(); toast('模型配置已保存') }
+  try { await api('models', { models, station: $('station').value }); await load(); toast('模型配置已保存') }
   catch (e) { toast(e.message, true) }
 })
 

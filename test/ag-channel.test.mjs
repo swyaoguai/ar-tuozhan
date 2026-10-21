@@ -84,13 +84,21 @@ function fakeRes() {
 const LLM_PI_AI_FIBER = { entry: { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai' } } }
 const OTHER_FIBER = { entry: { options: { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' } } }
 
-test('baseURL 归一：去掉尾部 /v1，避免 /v1/v1/messages', () => {
-  assert.equal(normalizeBaseURL('https://ps.air-outer.com/v1'), 'https://ps.air-outer.com')
-  assert.equal(normalizeBaseURL('https://agentrouter.org/v1'), 'https://agentrouter.org')
-  assert.equal(normalizeBaseURL('https://ps.air-outer.com'), 'https://ps.air-outer.com')
-  assert.equal(requestUrlOf('https://ps.air-outer.com'), 'https://ps.air-outer.com/v1/messages')
-  assert.equal(resolveBaseURL('ps'), 'https://ps.air-outer.com')
-  assert.equal(resolveBaseURL('agentrouter'), 'https://agentrouter.org')
+test('baseURL 归一按协议区别对待', () => {
+  // Anthropic：SDK 自己拼 /v1/messages → baseURL 去掉 /v1
+  assert.equal(normalizeBaseURL('https://ps.air-outer.com/v1', 'anthropic-messages'), 'https://ps.air-outer.com')
+  assert.equal(normalizeBaseURL('https://agentrouter.org/v1', 'anthropic-messages'), 'https://agentrouter.org')
+  assert.equal(normalizeBaseURL('https://ps.air-outer.com', 'anthropic-messages'), 'https://ps.air-outer.com')
+  assert.equal(requestUrlOf('https://ps.air-outer.com', 'anthropic-messages'), 'https://ps.air-outer.com/v1/messages')
+  assert.equal(resolveBaseURL('ps', 'anthropic-messages'), 'https://ps.air-outer.com')
+  assert.equal(resolveBaseURL('agentrouter', 'anthropic-messages'), 'https://agentrouter.org')
+
+  // OpenAI 系：SDK 拼 /responses、/chat/completions → baseURL 必须保留 /v1
+  assert.equal(normalizeBaseURL('https://ps.air-outer.com/v1', 'openai-responses'), 'https://ps.air-outer.com/v1')
+  assert.equal(normalizeBaseURL('https://agentrouter.org/v1', 'openai-completions'), 'https://agentrouter.org/v1')
+  assert.equal(requestUrlOf('https://ps.air-outer.com/v1', 'openai-responses'), 'https://ps.air-outer.com/v1/responses')
+  assert.equal(requestUrlOf('https://ps.air-outer.com/v1', 'openai-completions'), 'https://ps.air-outer.com/v1/chat/completions')
+  assert.equal(resolveBaseURL('ps', 'openai-responses'), 'https://ps.air-outer.com/v1')
 })
 
 test('启动时把插件的缺项补进 profile 里那个托管路由（按 URL 认，名字随意）', async () => {
@@ -104,14 +112,20 @@ test('启动时把插件的缺项补进 profile 里那个托管路由（按 URL 
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, apiKeyEnv: 'AG_API_KEY', originator: 'codex_cli_rs', autoFailover: false })
   await new Promise((resolve) => setTimeout(resolve, 30))
 
-  const written = ctx.edits.at(-1)?.next?.providers?.ar
+  const providers = ctx.edits.at(-1)?.next?.providers
+  const written = providers?.ar
   assert.ok(written, '应当写进 ar 这个路由（baseURL 命中托管 host）')
   assert.equal(written.baseURL, 'https://ps.air-outer.com', '用户的 baseURL 不动')
   assert.deepEqual(written.models, [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar' }], '用户的模型不动')
   assert.equal(written.headers.originator, 'codex_cli_rs', '插件补上 originator 头')
   assert.equal(written.api, 'anthropic-messages')
   assert.equal(written.apiKeyEnv, 'AR_API_KEY', '用户的凭据引用不动')
-  assert.equal(ctx.edits.at(-1).next.providers['minimax-cn'].apiKeyEnv, 'MINIMAX_CN_API_KEY', '别的路由不碰')
+  assert.equal(providers['minimax-cn'].apiKeyEnv, 'MINIMAX_CN_API_KEY', '别的路由不碰')
+  // 第二个站点（agentrouter / openai-responses）应当另建一个路由，且 baseURL 保留 /v1
+  assert.ok(providers.ar2, '应当为第二个站点建路由')
+  assert.equal(providers.ar2.api, 'openai-responses')
+  assert.equal(providers.ar2.baseURL, 'https://agentrouter.org/v1', 'openai-responses 的 baseURL 保留 /v1')
+  assert.equal(providers.ar2.headers.originator, 'codex_cli_rs')
 })
 
 test('一个托管路由都没有时，新建一个（默认名 ag）', async () => {
@@ -124,6 +138,8 @@ test('一个托管路由都没有时，新建一个（默认名 ag）', async ()
   assert.ok(providers.ar, '应当新建 ar')
   assert.equal(providers.ar.baseURL, 'https://ps.air-outer.com')
   assert.deepEqual(providers.ar.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
+  assert.ok(providers.ar2, '应当为第二个站点建路由')
+  assert.equal(providers.ar2.baseURL, 'https://agentrouter.org/v1')
   assert.equal(providers.other.baseURL, 'https://ai.1tim.com/v1', '别的路由不碰')
 })
 
@@ -134,8 +150,10 @@ test('/ag-channel status 能报出当前地址与请求地址', async () => {
   assert.ok(cmd)
   const out = await cmd.handler({ rawInput: 'status' })
   assert.equal(out.kind, 'success')
-  assert.match(out.text, /agentrouter/)
-  assert.match(out.text, /https:\/\/agentrouter\.org\/v1\/messages/)
+  assert.match(out.text, /ps（ar，anthropic-messages）/)
+  assert.match(out.text, /https:\/\/ps\.air-outer\.com\/v1\/messages/)
+  assert.match(out.text, /agentrouter（ar2，openai-responses）/)
+  assert.match(out.text, /https:\/\/agentrouter\.org\/v1\/responses/)
 })
 
 test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', async () => {

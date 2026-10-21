@@ -296,9 +296,20 @@ window.__ModuleLoader__.load({
       }
       if (!state) return h('div', { style: S.page }, h('p', { style: S.sub }, '加载中…'))
 
+      const stations = state.stations ?? []
+      const active = stations.find((item) => item.id === state.currentStation) ?? stations[0]
       return h('div', { style: S.page },
         h('div', { style: S.card },
-          h('h2', { style: S.h2 }, '渠道'),
+          h('h2', { style: S.h2 }, '套站'),
+          h('div', { style: S.row },
+            ...stations.map((item) => h('button', {
+              key: item.id,
+              style: { ...S.btn, ...(item.id === active?.id ? { borderColor: 'var(--dsh-accent,#4f7cff)' } : {}) },
+              disabled: busy,
+              onClick: () => run(() => api('station', { id: item.id })),
+            }, `${item.label}（${item.api}）`)),
+          ),
+          h('p', { style: S.hint }, '两个站点各对应一个 provider 路由，key 池共用。'),
           h('div', { style: S.row },
             h('button', {
               style: { ...S.btn, ...(state.preset === 'ps' ? { borderColor: 'var(--dsh-accent,#4f7cff)' } : {}) },
@@ -314,10 +325,12 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 } },
             h('span', { style: { opacity: 0.65 } }, '实际请求'),
             h('span', { style: S.mono }, state.requestUrl),
+            h('span', { style: { opacity: 0.65 } }, '协议'),
+            h('span', { style: S.mono }, state.api ?? ''),
             h('span', { style: { opacity: 0.65 } }, '请求头'),
             h('span', { style: S.mono }, JSON.stringify(state.headers)),
-            h('span', { style: { opacity: 0.65 } }, '渠道名'),
-            h('span', { style: S.mono }, state.managedIds?.length > 0 ? state.managedIds.join(', ') : '（未接管）'),
+            h('span', { style: { opacity: 0.65 } }, '路由'),
+            h('span', { style: S.mono }, active?.routeId ?? '（未接管）'),
           ),
           h('p', { style: S.hint }, '两个地址任意一个都能用；主地址连不上时插件会自动换另一个。'),
         ),

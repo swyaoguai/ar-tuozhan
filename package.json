@@ -1,8 +1,8 @@
 {
   "name": "ar-tuozhan",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "type": "module",
-  "description": "DSH 插件：ar 渠道（agentrouter / ps.air-outer 两个中转站），带上 originator 请求头、模型可编辑，并内置 API Key 轮询（额度耗尽自动换下一个 key 并重试）+ 可视化管理界面。",
+  "description": "DSH 插件：管理 ar 套站的两个 provider（ps.air-outer 走 anthropic-messages、agentrouter 走 openai-responses），带上 originator 请求头、模型可编辑，两个站点共用一个 key 池（额度耗尽自动换下一个并重试）+ 可视化界面。",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
