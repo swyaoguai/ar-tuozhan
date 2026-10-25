@@ -157,8 +157,11 @@ function render() {
   let html = '<table><thead><tr><th>Key</th><th>状态</th><th>当前</th><th></th></tr></thead><tbody>'
   for (const key of state.keys) {
     const st = statusOf(key)
+    const label = (key.alias ?? '') !== '' ? key.alias : key.mask
+    const title = (key.alias ?? '') !== '' ? `${key.alias}（${key.mask}）` : key.mask
     html += '<tr>'
-    html += '<td class="mono">' + escapeHtml(key.mask) + (key.lastError ? '<div class="hint" style="margin:2px 0 0">' + escapeHtml(key.lastError.slice(0, 120)) + '</div>' : '') + '</td>'
+    html += '<td class="mono"><span class="aliasEdit" data-alias-for="' + escapeHtml(key.full) + '" data-alias="' + escapeHtml(key.alias ?? '') + '" data-mask="' + escapeHtml(key.mask) + '" title="' + escapeHtml(title + ' —— 点击改别名') + '">' + escapeHtml(label) + '</span>'
+    html += (key.lastError ? '<div class="hint" style="margin:2px 0 0">' + escapeHtml(key.lastError.slice(0, 120)) + '</div>' : '') + '</td>'
     html += '<td><span class="pill ' + st.cls + '">' + st.text + '</span></td>'
     html += '<td>' + (key.current ? '<span class="pill ok">使用中</span>' : '') + '</td>'
     html += '<td style="text-align:right; white-space:nowrap">'
@@ -168,6 +171,29 @@ function render() {
   }
   html += '</tbody></table>'
   table.innerHTML = html
+  // 别名编辑：点击变输入框，失焦/回车保存，Esc 取消
+  for (const span of table.querySelectorAll('.aliasEdit')) {
+    span.addEventListener('click', () => {
+      const keyFull = span.dataset.aliasFor
+      const input = document.createElement('input')
+      input.value = span.dataset.alias ?? ''
+      input.placeholder = span.dataset.mask ?? ''
+      input.style.cssText = 'width:100%;font:12px ui-monospace,Menlo,Consolas,monospace;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);outline:none'
+      span.replaceWith(input)
+      input.focus()
+      input.select()
+      const commit = async () => {
+        const alias = input.value.trim().slice(0, 40)
+        try { await api('keys/alias', { key: keyFull, alias }); await load(); toast(alias === '' ? '别名已清除' : '别名已保存') }
+        catch (e) { toast(e.message, true); await load() }
+      }
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit() }
+        if (ev.key === 'Escape') load()
+      })
+      input.addEventListener('blur', () => { if (document.body.contains(input)) commit() })
+    })
+  }
   for (const btn of table.querySelectorAll('button[data-use]')) {
     btn.addEventListener('click', async () => {
       try { await api('keys/current', { key: btn.dataset.use }); await load(); toast('已设为优先') }

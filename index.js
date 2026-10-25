@@ -468,7 +468,12 @@ export function apply(ctx, config = {}) {
 
         if (action === 'add') {
           if (typeof value !== 'string' || value.length === 0) {
-            return { kind: 'error', text: '用法：add <key>' }
+            return { kind: 'error', text: '用法：add <key> [别名]' }
+          }
+          const aliasRaw = (invocation?.rawInput ?? '').trim().split(/\s+/)[2]
+          if (typeof aliasRaw === 'string' && aliasRaw.length > 0) {
+            if (!state.aliases || typeof state.aliases !== 'object') state.aliases = {}
+            state.aliases[value] = aliasRaw.slice(0, 40)
           }
           const keys = arKeys()
           if (!keys.includes(value)) keys.push(value)
@@ -549,7 +554,8 @@ export function apply(ctx, config = {}) {
             key.cooling > 0 ? `冷却 ${Math.ceil(key.cooling / 1000)}s` : '',
             key.failures > 0 ? `失败 ${key.failures} 次` : '',
           ].filter(Boolean).join(' / ')
-          lines.push(`  ${key.key}${flags ? '  [' + flags + ']' : ''}${key.lastError ? '  ' + key.lastError : ''}`)
+          const alias = state.aliases?.[key.full] ?? ''
+          lines.push(`  ${key.key}${alias ? '（' + alias + '）' : ''}${flags ? '  [' + flags + ']' : ''}${key.lastError ? '  ' + key.lastError : ''}`)
         }
         if (arKeys().length === 0) {
           lines.push('  （还没有 key —— 用 /ar-tuozhan add <key> 加几个）')
@@ -588,6 +594,7 @@ export function apply(ctx, config = {}) {
       const keys = (enginePool?.keys ?? []).map((key) => ({
         mask: key.key,
         full: key.full,
+        alias: state.aliases?.[key.full] ?? '',
         current: enginePool?.current === key.full,
         banned: key.banned,
         failures: key.failures,
@@ -662,6 +669,18 @@ export function apply(ctx, config = {}) {
           sendJson(res, 200, stateSnapshot())
           return
         }
+        if (req.method === 'POST' && sub === 'api/keys/alias') {
+          const body = JSON.parse((await readBody(req)) || '{}')
+          const key = typeof body.key === 'string' ? body.key : ''
+          const alias = typeof body.alias === 'string' ? body.alias.trim().slice(0, 40) : ''
+          if (!arKeys().includes(key)) { sendJson(res, 400, { ok: false, error: '池里没有这个 key' }); return }
+          if (!state.aliases || typeof state.aliases !== 'object') state.aliases = {}
+          if (alias === '') delete state.aliases[key]
+          else state.aliases[key] = alias
+          writeState(home, state)
+          sendJson(res, 200, stateSnapshot())
+          return
+        }
         if (req.method === 'POST' && sub === 'api/keys/current') {
           const body = JSON.parse((await readBody(req)) || '{}')
           const key = typeof body.key === 'string' ? body.key : ''
@@ -675,9 +694,11 @@ export function apply(ctx, config = {}) {
         if (req.method === 'POST' && sub === 'api/keys/remove') {
           const body = JSON.parse((await readBody(req)) || '{}')
           const keys = arKeys()
-          const index = keys.indexOf(typeof body.key === 'string' ? body.key : '')
+          const removed = typeof body.key === 'string' ? body.key : ''
+          const index = keys.indexOf(removed)
           if (index >= 0) keys.splice(index, 1)
           state.keys = keys
+          if (state.aliases && typeof state.aliases === 'object') delete state.aliases[removed]
           writeState(home, state)
           engine.pools = [arPool(), ...genericPools()]
           sendJson(res, 200, stateSnapshot())

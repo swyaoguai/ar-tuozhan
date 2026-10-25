@@ -117,30 +117,65 @@ window.__ModuleLoader__.load({
         keys.length === 0
           ? h('p', { style: S.empty }, '还没有 key —— 在上面粘贴一个开始。')
           : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-            keys.map((key) => h('div', {
-              key: key.full,
-              style: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px', borderRadius: 7, background: 'rgba(128,128,128,.08)' },
-            },
-              h('span', { style: { ...S.mono, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, key.mask),
-              key.current ? pill('使用中', '#37b24d') : null,
-              key.banned ? pill('已拉黑', '#e03131') : null,
-              !key.banned && key.cooling > 0 ? pill(`冷却 ${Math.ceil(key.cooling / 1000)}s`, '#f08c00') : null,
-              !key.banned && key.cooling === 0 && key.failures > 0 ? pill(`失败 ${key.failures} 次`, '#f08c00') : null,
-              h('button', {
-                style: { ...S.btnGhost },
-                disabled: busy || key.current === true,
-                title: key.current ? '当前优先使用的 key' : '设为优先使用的 key',
-                onClick: () => run(() => api('keys/current', { key: key.full })),
-              }, key.current ? '优先中' : '优先'),
-              h('button', {
-                style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
-                disabled: busy,
-                onClick: () => run(() => api('keys/remove', { key: key.full })),
-              }, '删除'),
-            )),
+            keys.map((key) => h(AliasRow, { key: key.full, entry: key, busy, run })),
           ),
         compact ? null : h('p', { style: S.hint }, '上游返回 401 / 402 / 429 时，插件会自动冷却当前 key、换下一个并重发当前请求。池里只有一个 key 时没有轮换可言。'),
         error ? h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } }, error) : null,
+      )
+    }
+
+    /**
+     * key 一行：别名 + 掩码 + 状态 + 操作。
+     * 别名点击即可编辑（失焦或回车保存，Esc 取消），空值表示无别名。
+     */
+    function AliasRow({ entry, busy, run }) {
+      const [editing, setEditing] = useState(false)
+      const [draft, setDraft] = useState(entry.alias ?? '')
+      const label = (entry.alias ?? '') !== '' ? entry.alias : entry.mask
+
+      const save = () => {
+        setEditing(false)
+        const next = draft.trim()
+        if (next === (entry.alias ?? '')) return
+        run(() => api('keys/alias', { key: entry.full, alias: next }))
+      }
+
+      return h('div', {
+        style: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px', borderRadius: 7, background: 'rgba(128,128,128,.08)' },
+      },
+        editing
+          ? h('input', {
+              style: { ...S.input, flex: 1, minWidth: 0, font: '12px ui-monospace, Menlo, Consolas, monospace' },
+              autoFocus: true,
+              value: draft,
+              placeholder: entry.mask,
+              onChange: (e) => setDraft(e.target.value),
+              onBlur: save,
+              onKeyDown: (e) => {
+                if (e.key === 'Enter') save()
+                if (e.key === 'Escape') { setDraft(entry.alias ?? ''); setEditing(false) }
+              },
+            })
+          : h('span', {
+              style: { ...S.mono, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'text' },
+              title: `别名：${label}（点击修改）\n原始：${entry.mask}`,
+              onClick: () => { setDraft(entry.alias ?? ''); setEditing(true) },
+            }, label),
+        key.current === undefined ? null : (entry.current ? pill('使用中', '#37b24d') : null),
+        entry.banned ? pill('已拉黑', '#e03131') : null,
+        !entry.banned && entry.cooling > 0 ? pill(`冷却 ${Math.ceil(entry.cooling / 1000)}s`, '#f08c00') : null,
+        !entry.banned && entry.cooling === 0 && entry.failures > 0 ? pill(`失败 ${entry.failures} 次`, '#f08c00') : null,
+        h('button', {
+          style: { ...S.btnGhost },
+          disabled: busy || entry.current === true,
+          title: entry.current ? '当前优先使用的 key' : '设为优先使用的 key',
+          onClick: () => run(() => api('keys/current', { key: entry.full })),
+        }, entry.current ? '优先中' : '优先'),
+        h('button', {
+          style: { ...S.btnGhost, color: 'var(--dsh-danger,#e03131)' },
+          disabled: busy,
+          onClick: () => run(() => api('keys/remove', { key: entry.full })),
+        }, '删除'),
       )
     }
 
