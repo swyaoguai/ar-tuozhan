@@ -161,7 +161,7 @@ window.__ModuleLoader__.load({
               title: `别名：${label}（点击修改）\n原始：${entry.mask}`,
               onClick: () => { setDraft(entry.alias ?? ''); setEditing(true) },
             }, label),
-        key.current === undefined ? null : (entry.current ? pill('使用中', '#37b24d') : null),
+        entry.current ? pill('使用中', '#37b24d') : null,
         entry.banned ? pill('已拉黑', '#e03131') : null,
         !entry.banned && entry.cooling > 0 ? pill(`冷却 ${Math.ceil(entry.cooling / 1000)}s`, '#f08c00') : null,
         !entry.banned && entry.cooling === 0 && entry.failures > 0 ? pill(`失败 ${entry.failures} 次`, '#f08c00') : null,
@@ -386,6 +386,29 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 错误边界：面板里任何一处渲染抛错都兜在这里，显示报错而不是白掉整页。
+     */
+    class PanelBoundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { error: null }
+      }
+      static getDerivedStateFromError(error) {
+        return { error }
+      }
+      render() {
+        if (this.state.error !== null) {
+          return h('div', { style: { ...S.page } },
+            h('p', { style: { ...S.sub, color: 'var(--dsh-danger, #e03131)' } },
+              `面板渲染出错：${this.state.error?.message ?? this.state.error}`),
+            h('button', { style: S.btn, onClick: () => this.setState({ error: null }) }, '重试'),
+          )
+        }
+        return this.props.children
+      }
+    }
+
     /* ------------------------------------------------------------------ */
 
     function apply(ctx) {
@@ -397,7 +420,7 @@ window.__ModuleLoader__.load({
           order: 43,
           label: () => 'ar 套站',
         },
-        AgChannelSettings,
+        props => h(PanelBoundary, null, h(AgChannelSettings, props)),
       ))
     }
 

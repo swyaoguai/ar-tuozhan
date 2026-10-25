@@ -13,6 +13,7 @@ const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
  * 极简 React 替身：client 只用到这几个导出。
  * reactState.override 可以预置 useState 的返回值（模拟宿主返回的状态）。
  */
+class FakeComponent {}
 const reactState = { override: null }
 const fakeReact = {
   // 返回一个可辨识的对象，这样「渲染出了东西」和「返回 null」能区分开
@@ -20,6 +21,7 @@ const fakeReact = {
   useState: (initial) => [reactState.override ?? initial, () => {}],
   useEffect: () => {},
   useCallback: (fn) => fn,
+  Component: FakeComponent,
 }
 
 test('client.js 会向外壳注册，且 factory 返回一个客户端插件', () => {
