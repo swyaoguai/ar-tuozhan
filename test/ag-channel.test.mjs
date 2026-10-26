@@ -122,24 +122,24 @@ test('启动时把插件的缺项补进 profile 里那个托管路由（按 URL 
   assert.equal(written.apiKeyEnv, 'AR_API_KEY', '用户的凭据引用不动')
   assert.equal(providers['minimax-cn'].apiKeyEnv, 'MINIMAX_CN_API_KEY', '别的路由不碰')
   // 第二个站点（agentrouter / openai-responses）应当另建一个路由，且 baseURL 保留 /v1
-  assert.ok(providers.ar2, '应当为第二个站点建路由')
-  assert.equal(providers.ar2.api, 'openai-responses')
-  assert.equal(providers.ar2.baseURL, 'https://agentrouter.org/v1', 'openai-responses 的 baseURL 保留 /v1')
-  assert.equal(providers.ar2.headers.originator, 'codex_cli_rs')
+  assert.ok(providers.agentrouter, '应当为第二个站点建路由')
+  assert.equal(providers.agentrouter.api, 'openai-responses')
+  assert.equal(providers.agentrouter.baseURL, 'https://agentrouter.org/v1', 'openai-responses 的 baseURL 保留 /v1')
+  assert.equal(providers.agentrouter.headers.originator, 'codex_cli_rs')
 })
 
-test('一个托管路由都没有时，新建一个（默认名 ag）', async () => {
+test('一个托管路由都没有时，按 host 派生名新建两个路由', async () => {
   const ctx = makeCtx()
   ctx.patch = { providers: { other: { apiKeyEnv: 'Y', api: 'openai-completions', baseURL: 'https://ai.1tim.com/v1', models: [{ id: 'm2' }] } } }
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false })
   await new Promise((resolve) => setTimeout(resolve, 30))
 
   const providers = ctx.edits.at(-1)?.next?.providers
-  assert.ok(providers.ar, '应当新建 ar')
-  assert.equal(providers.ar.baseURL, 'https://ps.air-outer.com')
-  assert.deepEqual(providers.ar.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
-  assert.ok(providers.ar2, '应当为第二个站点建路由')
-  assert.equal(providers.ar2.baseURL, 'https://agentrouter.org/v1')
+  assert.ok(providers.ps, '应当新建 ps 路由')
+  assert.equal(providers.ps.baseURL, 'https://ps.air-outer.com')
+  assert.deepEqual(providers.ps.models.map((m) => m.id), ['deepseek-v4-flash', 'claude-opus-5.5', 'gpt-6-astra', 'gpt-6.1-sol'])
+  assert.ok(providers.agentrouter, '应当为第二个站点建路由')
+  assert.equal(providers.agentrouter.baseURL, 'https://agentrouter.org/v1')
   assert.equal(providers.other.baseURL, 'https://ai.1tim.com/v1', '别的路由不碰')
 })
 
@@ -150,9 +150,9 @@ test('/ag-channel status 能报出当前地址与请求地址', async () => {
   assert.ok(cmd)
   const out = await cmd.handler({ rawInput: 'status' })
   assert.equal(out.kind, 'success')
-  assert.match(out.text, /ps（ar，anthropic-messages）/)
+  assert.match(out.text, /ps（ps，anthropic-messages）/)
   assert.match(out.text, /https:\/\/ps\.air-outer\.com\/v1\/messages/)
-  assert.match(out.text, /agentrouter（ar2，openai-responses）/)
+  assert.match(out.text, /agentrouter（agentrouter，openai-responses）/)
   assert.match(out.text, /https:\/\/agentrouter\.org\/v1\/responses/)
 })
 
@@ -207,7 +207,7 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
   const switched = await call('POST', '/ar-tuozhan/api/url', { url: 'agentrouter' })
   assert.equal(JSON.parse(switched.body).baseURL, 'https://agentrouter.org')
   // 地址是写进 profile patch 的（和「设置 → 模型」同一份数据）
-  assert.equal(ctx.edits.at(-1).next.providers.ar.baseURL, 'https://agentrouter.org')
+  assert.equal(ctx.edits.at(-1).next.providers.ps.baseURL, 'https://agentrouter.org')
 
   const removed = await call('POST', '/ar-tuozhan/api/keys/remove', { key: 'sk-one' })
   assert.equal(JSON.parse(removed.body).keys.length, before + 1)
@@ -227,7 +227,7 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
     models: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol-ar', contextWindow: 256000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: { off: null, low: 'low' } }],
   })
   assert.equal(modelsSaved.status, 200)
-  const written = ctx.edits.at(-1).next.providers.ar.models
+  const written = ctx.edits.at(-1).next.providers.ps.models
   assert.equal(written.length, 1)
   assert.equal(written[0].id, 'gpt-6.1-sol')
   assert.equal(written[0].contextWindow, 256000)

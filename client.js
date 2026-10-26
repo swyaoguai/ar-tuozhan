@@ -332,7 +332,7 @@ window.__ModuleLoader__.load({
       if (!state) return h('div', { style: S.page }, h('p', { style: S.sub }, '加载中…'))
 
       const stations = state.stations ?? []
-      const active = stations.find((item) => item.id === state.currentStation) ?? stations[0]
+      const active = stations.find((item) => (item.key ?? item.id) === state.currentStation) ?? stations[0]
       return h('div', { style: S.page },
         h('div', { style: S.card },
           h('h2', { style: S.h2 }, '套站'),

@@ -83,8 +83,16 @@ export function apply(ctx, config = {}) {
   }
 
   /** 套站点列表（两个，各对应一个 provider 路由）。 */
-  const stations = () => (Array.isArray(state.stations) && state.stations.length > 0 ? state.stations : DEFAULT_STATIONS)
-  const stationById = (id) => stations().find((station) => station.id === id)
+  /** 站点身份键：用 host，路由叫什么名字都不影响归属。 */
+  const stationKeyOf = (station) => {
+    const host = hostOfBaseURL(resolveBaseURL(station?.url ?? '', station?.api))
+    return host !== '' ? host : String(station?.id ?? '')
+  }
+  const stations = () => {
+    const list = Array.isArray(state.stations) && state.stations.length > 0 ? state.stations : DEFAULT_STATIONS
+    return list.map((station) => ({ ...station, key: stationKeyOf(station) }))
+  }
+  const stationById = (id) => stations().find((station) => station.id === id || station.key === id)
   /** 当前选中的站点（面板里编辑哪一个）。 */
   const currentStation = () => {
     const id = typeof state.current === 'string' ? state.current : undefined
@@ -250,9 +258,36 @@ export function apply(ctx, config = {}) {
 
   /** 凭据服务可选：有就把换到的 key 写回去，下一次请求原生就用它。 */
   let credentials = null
+  let seeded = false
   ctx.inject(['credentials'], (scoped) => {
     credentials = scoped.credentials ?? null
+    // 凭据服务到位后立刻把池里的当前 key 灌进去（apply 那会儿它可能还没注入）
+    if (credentials !== null && !seeded) {
+      seeded = true
+      setTimeout(() => { void seedCredential() }, 0)
+    }
   })
+  /**
+   * 把池里的当前 key 写进凭据引用 —— provider 只要指向它就能用上，
+   * 不需要人再手填一次。池里有 key 而凭据空/不在池里时都覆盖。
+   */
+  const seedCredential = async () => {
+    if (credentials === null) return
+    const pool = arPool()
+    if (pool.keys.length === 0) return
+    const key = engine.currentKey(pool) ?? pool.keys[0]
+    if (key === null) return
+    try {
+      const stored = await credentials.resolve?.(pool.credentialRef)
+      const value = stored?.value
+      if (value === undefined || value === '' || pool.keys.includes(value)) {
+        await credentials.set?.(pool.credentialRef, key)
+        ctx.logger?.info?.(`ar-tuozhan: ${pool.credentialRef} 已指向池里的当前 key`)
+      }
+    } catch (error) {
+      ctx.logger?.warn?.(`ar-tuozhan: 初始化凭据失败: ${error?.message ?? error}`)
+    }
+  }
   const writeCredential = async (pool, key) => {
     if (credentials === null || pool.credentialRef === '') return
     try {
@@ -363,26 +398,6 @@ export function apply(ctx, config = {}) {
   }
   void ensureManagedRoutes()
 
-  /** 启动时把池里的当前 key 写进凭据引用（provider 因此不需要改配置）。 */
-  const seedCredential = async () => {
-    if (credentials === null) return
-    const pool = arPool()
-    if (pool.keys.length === 0) return
-    const key = engine.currentKey(pool)
-    if (key === null) return
-    try {
-      const stored = await credentials.resolve?.(pool.credentialRef)
-      const value = stored?.value
-      if (value === undefined || value === '' || pool.keys.includes(value)) {
-        await credentials.set?.(pool.credentialRef, key)
-        ctx.logger?.info?.(`ar-tuozhan: ${pool.credentialRef} 已指向池里的当前 key`)
-      }
-    } catch (error) {
-      ctx.logger?.warn?.(`ar-tuozhan: 初始化凭据失败: ${error?.message ?? error}`)
-    }
-  }
-  void seedCredential()
-
   /** 状态文件变了自动重载（加 key 之后不必重启）。 */
   let lastMtime = 0
   const reloadIfChanged = () => {
@@ -429,11 +444,11 @@ export function apply(ctx, config = {}) {
         if (action === 'site') {
           const station = value === undefined ? currentStation() : stationById(value)
           if (station === undefined) {
-            return { kind: 'error', text: `没有叫 "${value}" 的站点。可用：${stations().map((s) => s.id).join('、')}` }
+            return { kind: 'error', text: `没有叫 "${value}" 的站点。可用：${stations().map((s) => s.key ?? s.id).join('、')}` }
           }
-          state.current = station.id
+          state.current = station.key ?? station.id
           writeState(home, state)
-          return { kind: 'success', text: `当前站点切到「${station.label}」（${station.id}，${station.api}）。` }
+          return { kind: 'success', text: `当前站点切到「${station.label}」（${station.key ?? station.id}，${station.api}）。` }
         }
 
         if (action === 'url') {
@@ -618,6 +633,7 @@ export function apply(ctx, config = {}) {
         const api = route.api ?? station.api
         return {
           id: station.id,
+          key: station.key ?? station.id,
           label: station.label,
           api,
           url: station.url,
@@ -643,7 +659,7 @@ export function apply(ctx, config = {}) {
         models: row.models ?? defaults.models,
         api: row.api ?? defaults.api,
         stations: stationRows,
-        currentStation: active.id,
+        currentStation: active.key ?? active.id,
         keys,
         poolId: 'ar',
         managedId: managedRouteId(),
@@ -716,8 +732,9 @@ export function apply(ctx, config = {}) {
         if (req.method === 'POST' && sub === 'api/station') {
           const body = JSON.parse((await readBody(req)) || '{}')
           const id = typeof body.id === 'string' ? body.id : ''
-          if (stationById(id) === undefined) { sendJson(res, 400, { ok: false, error: '没有这个站点' }); return }
-          state.current = id
+          const picked = stationById(id)
+          if (picked === undefined) { sendJson(res, 400, { ok: false, error: '没有这个站点' }); return }
+          state.current = picked.key ?? picked.id
           writeState(home, state)
           sendJson(res, 200, stateSnapshot())
           return

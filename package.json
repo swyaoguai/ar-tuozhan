@@ -1,6 +1,6 @@
 {
   "name": "ar-tuozhan",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "type": "module",
   "description": "DSH 插件：管理 ar 套站的两个 provider（ps.air-outer 走 anthropic-messages、agentrouter 走 openai-responses），带上 originator 请求头、模型可编辑，两个站点共用一个 key 池（额度耗尽自动换下一个并重试）+ 可视化界面。",
   "main": "./index.js",

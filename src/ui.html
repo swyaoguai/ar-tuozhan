@@ -138,9 +138,9 @@ function render() {
   $('headers').textContent = JSON.stringify(state.headers)
   $('models').textContent = state.models.map((m) => m.id).join(', ')
   const stations = state.stations ?? []
-  const active = stations.find((item) => item.id === state.currentStation) ?? stations[0]
-  $('station').innerHTML = stations.map((item) => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label + '（' + item.api + '）') + '</option>').join('')
-  if (active) $('station').value = active.id
+  const active = stations.find((item) => (item.key ?? item.id) === state.currentStation) ?? stations[0]
+  $('station').innerHTML = stations.map((item) => '<option value="' + escapeHtml(item.key ?? item.id) + '">' + escapeHtml(item.label + '（' + item.api + '）') + '</option>').join('')
+  if (active) $('station').value = active.key ?? active.id
   $('url').value = active ? active.url : state.url
   $('preset').value = 'custom'
   $('api').textContent = active ? active.api : ''

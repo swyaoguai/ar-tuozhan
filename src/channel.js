@@ -30,14 +30,18 @@ export const DEFAULT_MODELS = [
 ]
 
 /**
- * 两个套站点，各对应一个 provider（路由）：
- *   ps         → ps.air-outer.com  → anthropic-messages（SDK 自己拼 /v1/messages）
- *   agentrouter→ agentrouter.org   → openai-responses（SDK 拼 /responses，baseURL 留 /v1）
+ * 两个套站点，各对应一个 provider（路由）。
+ *
+ * **身份是 host，不是名字**：`id` 只是给人看的短标签，路由叫什么（ar、ar2、
+ * 随便改）都不影响归属 —— 插件一律按 baseURL 的 host 认路由。
+ *
+ *   ps.air-outer.com → anthropic-messages（SDK 自己拼 /v1/messages）
+ *   agentrouter.org  → openai-responses（SDK 拼 /responses，baseURL 留 /v1）
  * 两者实测都支持这两种协议；originator 头是必需的。
  */
 export const DEFAULT_STATIONS = [
-  { id: 'ar', label: 'ps', url: URL_PRESETS.ps, api: 'anthropic-messages' },
-  { id: 'ar2', label: 'agentrouter', url: URL_PRESETS.agentrouter, api: 'openai-responses' },
+  { id: 'ps', label: 'ps', url: URL_PRESETS.ps, api: 'anthropic-messages' },
+  { id: 'agentrouter', label: 'agentrouter', url: URL_PRESETS.agentrouter, api: 'openai-responses' },
 ]
 
 export function dshHome(env = process.env) {
