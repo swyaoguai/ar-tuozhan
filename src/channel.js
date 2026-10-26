@@ -119,10 +119,14 @@ export function writeState(home, state) {
  *
  * 也就是说：用户填的永远是「完整端点」（https://host/v1），插件按协议决定
  * 去掉还是保留那截 /v1。
+ *
+ * 传进来的是预设名（ps / agentrouter）时先解析成 URL——调用方不必自己判断，
+ * 免得把 "ps" 这种字符串当地址写进配置。
  */
 export function normalizeBaseURL(input, api = 'anthropic-messages') {
   let url = String(input ?? '').trim()
   if (url === '') return ''
+  if (URL_PRESETS[url] !== undefined) url = URL_PRESETS[url]
   url = url.replace(/\/+$/, '')
   if (api === 'anthropic-messages') url = url.replace(/\/v1$/i, '')
   return url

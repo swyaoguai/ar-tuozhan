@@ -98,7 +98,7 @@ export function apply(ctx, config = {}) {
   const managedHosts = () => {
     const hosts = new Set(presetHosts())
     for (const station of stations()) {
-      const host = hostOfBaseURL(normalizeBaseURL(station.url, station.api))
+      const host = hostOfBaseURL(resolveBaseURL(station.url, station.api))
       if (host !== '') hosts.add(host)
     }
     return hosts
@@ -111,7 +111,7 @@ export function apply(ctx, config = {}) {
   const routeIdOfStation = (station) => {
     if (station === undefined || station === null) return managedRouteId()
     const providers = patchProviders()
-    const stationHost = hostOfBaseURL(normalizeBaseURL(station.url, station.api))
+    const stationHost = hostOfBaseURL(resolveBaseURL(station.url, station.api))
     const found = Object.keys(providers).find((id) => {
       const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
       return host !== '' && host === stationHost
@@ -159,8 +159,15 @@ export function apply(ctx, config = {}) {
    * Models 页改的是同一份东西，谁都不会冲掉谁。
    */
   let configEditor = null
+  /** configEditor 一到位就补一次托管路由（启动时它可能还没注入）。 */
+  let ensureScheduled = false
   ctx.inject(['configEditor'], (scoped) => {
     configEditor = scoped.configEditor ?? null
+    if (configEditor !== null && !ensureScheduled) {
+      ensureScheduled = true
+      // 放到下一个 tick：此时 apply 已跑完，ensureManagedRoutes 已定义
+      setTimeout(() => { void ensureManagedRoutes() }, 0)
+    }
   })
   const managedRouteId = () => managedId ?? (typeof config.providerId === 'string' && config.providerId.length > 0 ? config.providerId : 'ar')
   /** 往某个路由写字段（stationId 为空时用当前站点）。 */
@@ -258,7 +265,7 @@ export function apply(ctx, config = {}) {
   const buildProfile = (station = currentStation()) => ({
     apiKeyEnv: typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0 ? config.apiKeyEnv : 'AR_API_KEY',
     api: station?.api ?? 'anthropic-messages',
-    baseURL: normalizeBaseURL(station?.url ?? URL_PRESETS[DEFAULT_PRESET], station?.api ?? 'anthropic-messages'),
+    baseURL: resolveBaseURL(station?.url ?? URL_PRESETS[DEFAULT_PRESET], station?.api ?? 'anthropic-messages'),
     models: models(station),
     headers: {
       ...(typeof config.originator === 'string' && config.originator.length > 0 ? { originator: config.originator } : { originator: 'codex_cli_rs' }),
@@ -315,7 +322,7 @@ export function apply(ctx, config = {}) {
     const wanted = {}
     const ids = []
     for (const station of stations()) {
-      const stationHost = hostOfBaseURL(normalizeBaseURL(station.url, station.api))
+      const stationHost = hostOfBaseURL(resolveBaseURL(station.url, station.api))
       // 这个站点已经有的路由（按 URL 认，名字随意）
       const existingId = Object.keys(providers).find((id) => {
         const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
@@ -326,7 +333,9 @@ export function apply(ctx, config = {}) {
       wanted[id] = {
         ...existing,
         api: existing.api ?? station.api,
-        baseURL: existing.baseURL ?? normalizeBaseURL(station.url, station.api),
+        baseURL: existing.baseURL ?? resolveBaseURL(station.url, station.api),
+        // 凭据引用必须有，否则 llm-pi-ai 解析不到 key 会直接报 MISSING_CREDENTIAL
+        apiKeyEnv: existing.apiKeyEnv ?? defaults.apiKeyEnv,
         models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : models(station),
         headers: { ...defaults.headers, ...(existing.headers ?? {}) },
         ...(existing.displayName === undefined ? { displayName: station.label ?? station.id } : {}),
@@ -531,7 +540,7 @@ export function apply(ctx, config = {}) {
           const routeId = routeIdOfStation(item)
           const route = providers[routeId] ?? {}
           const isCurrent = item.id === station.id
-          const baseURL = route.baseURL ?? normalizeBaseURL(item.url, item.api)
+          const baseURL = route.baseURL ?? resolveBaseURL(item.url, item.api)
           const api = route.api ?? item.api
           lines.push(`  ${isCurrent ? '▶' : ' '} ${item.label}（${item.id}，${api}）`)
           lines.push(`      路由: ${routeId}${route.displayName ? ` · 显示名 ${route.displayName}` : ''}`)
@@ -605,7 +614,7 @@ export function apply(ctx, config = {}) {
       const stationRows = stations().map((station) => {
         const routeId = routeIdOfStation(station)
         const route = providers[routeId] ?? {}
-        const baseURL = route.baseURL ?? normalizeBaseURL(station.url, station.api)
+        const baseURL = route.baseURL ?? resolveBaseURL(station.url, station.api)
         const api = route.api ?? station.api
         return {
           id: station.id,
