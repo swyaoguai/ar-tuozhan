@@ -42,6 +42,12 @@ export const inject = []
 const TARGET_PACKAGE = '@deepseek-ai/dsh-llm-pi-ai'
 const TARGET_ID = 'llm-pi-ai'
 
+/**
+ * 这些协议要求显式声明 compat.supportsStrictMode，
+ * 否则适配器不会发 strict:false，网关侧会把可选权限字段当成必填而拒绝。
+ */
+const RESPONSES_PROTOCOLS = ['openai-responses', 'azure-openai-responses', 'openai-codex-responses']
+
 let Config
 try {
   const { default: Schema } = await import('@deepseek-ai/schemastery')
@@ -83,14 +89,26 @@ export function apply(ctx, config = {}) {
   }
 
   /** 套站点列表（两个，各对应一个 provider 路由）。 */
-  /** 站点身份键：用 host，路由叫什么名字都不影响归属。 */
-  const stationKeyOf = (station) => {
-    const host = hostOfBaseURL(resolveBaseURL(station?.url ?? '', station?.api))
-    return host !== '' ? host : String(station?.id ?? '')
+  /** 站点 → 路由 id 的记忆（站点改地址后仍认得出自己那条路由）。 */
+  const rememberedRoutes = new Map()
+
+  /**
+   * 站点身份键：用 **host + 协议**。
+   * 同一个中转站上可能挂着两种协议的路由（anthropic-messages / openai-responses），
+   * 只看 host 会把它们认成一个。
+   */
+  const stationKeyOf = (station) => {    const host = hostOfBaseURL(resolveBaseURL(station?.url ?? '', station?.api))
+    const api = typeof station?.api === 'string' && station.api.length > 0 ? station.api : 'anthropic-messages'
+    return host !== '' ? `${host}#${api}` : String(station?.id ?? '')
   }
   const stations = () => {
     const list = Array.isArray(state.stations) && state.stations.length > 0 ? state.stations : DEFAULT_STATIONS
-    return list.map((station) => ({ ...station, key: stationKeyOf(station) }))
+    return list.map((station) => ({
+      ...station,
+      key: stationKeyOf(station),
+      // 记住上次认到的路由 id：改地址后仍认得出「这条路由是我的」
+      routeId: station.routeId ?? rememberedRoutes.get(stationKeyOf(station)) ?? '',
+    }))
   }
   const stationById = (id) => stations().find((station) => station.id === id || station.key === id)
   /** 当前选中的站点（面板里编辑哪一个）。 */
@@ -115,16 +133,59 @@ export function apply(ctx, config = {}) {
     const host = hostOfBaseURL(String(value ?? ''))
     return host !== '' && managedHosts().has(host)
   }
-  /** 站点 → profile patch 里对应的路由 id（按 URL 认；没有就用站点自己的 id）。 */
+  /**
+   * 站点 → profile patch 里对应的路由 id。
+   *
+   * 按 **(host + 协议)** 认，不只看 host：同一个中转站上可能同时挂着
+   * anthropic-messages 和 openai-responses 两条路由，它们得各认各的。
+   *
+   * 另外记住上次认到的路由 id（state 里的 routeId）：站点一旦改了地址，
+   * host 就对不上了，得靠这个记性才认得出「这条路由还是我的」。
+   */
   const routeIdOfStation = (station) => {
     if (station === undefined || station === null) return managedRouteId()
     const providers = patchProviders()
     const stationHost = hostOfBaseURL(resolveBaseURL(station.url, station.api))
-    const found = Object.keys(providers).find((id) => {
+    const stationApi = station.api
+    const ids = Object.keys(providers)
+    // 先按 host + 协议精确匹配
+    const exact = ids.find((id) => {
+      const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
+      return host !== '' && host === stationHost && (providers[id]?.api ?? stationApi) === stationApi
+    })
+    if (exact !== undefined) {
+      rememberRouteId(station, exact)
+      return exact
+    }
+    // 上次认过的那个（地址改了也还算数）
+    const remembered = typeof station.routeId === 'string' ? station.routeId : ''
+    if (remembered !== '' && providers[remembered] !== undefined) {
+      // 但要确认它现在确实是这个协议的（别抢了别的协议的路由）
+      const api = providers[remembered]?.api
+      if (api === undefined || api === stationApi) return remembered
+    }
+    // 退而求其次：同 host 的任意一条（协议可能还没写）
+    const sameHost = ids.find((id) => {
       const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
       return host !== '' && host === stationHost
     })
-    return found ?? station.id
+    const result = sameHost ?? station.id
+    rememberRouteId(station, result)
+    return result
+  }
+  /** 记住站点 ↔ 路由的对应关系（改地址后仍认得）。 */
+  const rememberRouteId = (station, routeId) => {
+    if (station === undefined || station === null) return
+    const key = station.key ?? stationKeyOf(station)
+    if (rememberedRoutes.get(key) === routeId) return
+    rememberedRoutes.set(key, routeId)
+    station.routeId = routeId
+    const list = Array.isArray(state.stations) ? state.stations : []
+    const target = list.find((item) => item === station || (item.id !== undefined && item.id === station.id))
+    if (target !== undefined) {
+      target.routeId = routeId
+      state.stations = list
+    }
   }
   const presetOf = (value) => {
     for (const [name, url] of Object.entries(URL_PRESETS)) {
@@ -358,8 +419,13 @@ export function apply(ctx, config = {}) {
     const ids = []
     for (const station of stations()) {
       const stationHost = hostOfBaseURL(resolveBaseURL(station.url, station.api))
-      // 这个站点已经有的路由（按 URL 认，名字随意）
-      const existingId = Object.keys(providers).find((id) => {
+      const providerIds = Object.keys(providers)
+      // 这个站点已经有的路由：先按 host + 协议精确匹配，
+      // 再退到同 host 的任意一条（协议可能还没写上）。
+      const existingId = providerIds.find((id) => {
+        const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
+        return host !== '' && host === stationHost && (providers[id]?.api ?? station.api) === station.api
+      }) ?? providerIds.find((id) => {
         const host = hostOfBaseURL(String(providers[id]?.baseURL ?? ''))
         return host !== '' && host === stationHost
       })
@@ -373,6 +439,11 @@ export function apply(ctx, config = {}) {
         apiKeyEnv: existing.apiKeyEnv ?? defaults.apiKeyEnv,
         models: Array.isArray(existing.models) && existing.models.length > 0 ? existing.models : models(station),
         headers: { ...defaults.headers, ...(existing.headers ?? {}) },
+        // openai-responses 这类协议必须显式声明 supportsStrictMode，
+        // 否则适配器不会发 strict:false，网关侧会把可选权限字段当成必填而拒绝。
+        ...(existing.compat === undefined && RESPONSES_PROTOCOLS.includes(existing.api ?? station.api)
+          ? { compat: { supportsStrictMode: true } }
+          : {}),
         ...(existing.displayName === undefined ? { displayName: station.label ?? station.id } : {}),
       }
       ids.push(id)

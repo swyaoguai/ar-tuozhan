@@ -9,8 +9,15 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-tuozhan-'))
-process.env.DSH_HOME = home
+/**
+ * 每个测试用独立的 DSH_HOME —— 插件会把站点配置写进 ~/.dsh/ar-tuozhan.json，
+ * 共用一个 home 会让前一个测试的改动污染后一个。
+ */
+function freshHome() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-tuozhan-'))
+  process.env.DSH_HOME = dir
+  return dir
+}
 
 const { apply, name } = await import('../index.js')
 const { normalizeBaseURL, requestUrlOf, resolveBaseURL, URL_PRESETS } = await import('../src/channel.js')
@@ -102,6 +109,7 @@ test('baseURL 归一按协议区别对待', () => {
 })
 
 test('启动时把插件的缺项补进 profile 里那个托管路由（按 URL 认，名字随意）', async () => {
+  const home = freshHome()
   const ctx = makeCtx()
   ctx.patch = {
     providers: {
@@ -129,6 +137,7 @@ test('启动时把插件的缺项补进 profile 里那个托管路由（按 URL 
 })
 
 test('一个托管路由都没有时，按 host 派生名新建两个路由', async () => {
+  const home = freshHome()
   const ctx = makeCtx()
   ctx.patch = { providers: { other: { apiKeyEnv: 'Y', api: 'openai-completions', baseURL: 'https://ai.1tim.com/v1', models: [{ id: 'm2' }] } } }
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false })
@@ -143,7 +152,42 @@ test('一个托管路由都没有时，按 host 派生名新建两个路由', as
   assert.equal(providers.other.baseURL, 'https://ai.1tim.com/v1', '别的路由不碰')
 })
 
+test('同一个 host 上挂两种协议的路由时，按 host+协议分开认', async () => {
+  const home = freshHome()
+  const ctx = makeCtx()
+  // ps.air-outer.com 上同时有 anthropic-messages 和 openai-responses 两条路由
+  ctx.patch = {
+    providers: {
+      ar: { apiKeyEnv: 'AR_API_KEY', api: 'anthropic-messages', baseURL: 'https://ps.air-outer.com', models: [{ id: 'm1' }] },
+      ar2: { apiKeyEnv: 'AR_API_KEY', api: 'openai-responses', baseURL: 'https://ps.air-outer.com/v1', models: [{ id: 'm2' }] },
+    },
+  }
+  // 第二个站点的地址也指到 ps（两个站同 host，靠协议区分）
+  const stateFile = path.join(home, 'ar-tuozhan.json')
+  fs.writeFileSync(stateFile, JSON.stringify({
+    keys: [],
+    stations: [
+      { id: 'ps', label: 'ps', url: 'https://ps.air-outer.com/v1', api: 'anthropic-messages' },
+      { id: 'ps-responses', label: 'ps-responses', url: 'https://ps.air-outer.com/v1', api: 'openai-responses' },
+    ],
+  }, null, 2))
+  apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  const providers = ctx.edits.at(-1)?.next?.providers
+  // 两条路由都还在，且各自保留自己的协议/模型
+  assert.equal(providers.ar.api, 'anthropic-messages')
+  assert.deepEqual(providers.ar.models.map((m) => m.id), ['m1'])
+  assert.equal(providers.ar2.api, 'openai-responses')
+  assert.deepEqual(providers.ar2.models.map((m) => m.id), ['m2'])
+  // openai-responses 自动补 compat.supportsStrictMode
+  assert.equal(providers.ar2.compat?.supportsStrictMode, true)
+  // anthropic 那条不需要
+  assert.equal(providers.ar.compat, undefined)
+})
+
 test('/ag-channel status 能报出当前地址与请求地址', async () => {
+  const home = freshHome()
   const ctx = makeCtx()
   apply(ctx, { enabled: true, url: URL_PRESETS.agentrouter, autoFailover: false })
   const cmd = ctx.commands.find((item) => item.name === 'ar-tuozhan')
@@ -157,6 +201,7 @@ test('/ag-channel status 能报出当前地址与请求地址', async () => {
 })
 
 test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', async () => {
+  const home = freshHome()
   const ctx = makeCtx()
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false, keyRotation: false })
   const cmd = ctx.commands.find((item) => item.name === 'ar-tuozhan')
@@ -169,6 +214,7 @@ test('/ag-channel add <key> 把 key 存进状态文件，并让池认到它', as
 })
 
 test('webServer 路由：页面、读状态、加删 key、切地址都能用', async () => {
+  const home = freshHome()
   const ctx = makeCtx()
   apply(ctx, { enabled: true, url: URL_PRESETS.ps, autoFailover: false, keyRotation: false })
   const routes = ctx.registered
@@ -207,7 +253,9 @@ test('webServer 路由：页面、读状态、加删 key、切地址都能用', 
   const switched = await call('POST', '/ar-tuozhan/api/url', { url: 'agentrouter' })
   assert.equal(JSON.parse(switched.body).baseURL, 'https://agentrouter.org')
   // 地址是写进 profile patch 的（和「设置 → 模型」同一份数据）
-  assert.equal(ctx.edits.at(-1).next.providers.ps.baseURL, 'https://agentrouter.org')
+  const patchAfter = ctx.edits.at(-1).next.providers
+  const switchedRoute = Object.values(patchAfter).find((route) => route?.baseURL === 'https://agentrouter.org')
+  assert.ok(switchedRoute, '切地址后应当有一条路由指向新地址')
 
   const removed = await call('POST', '/ar-tuozhan/api/keys/remove', { key: 'sk-one' })
   assert.equal(JSON.parse(removed.body).keys.length, before + 1)
